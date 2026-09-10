@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Activity, Shield, UploadCloud, Database } from 'lucide-react';
+import { Activity, Shield, UploadCloud, Database, Wrench } from 'lucide-react';
 
 import { useSecurityContext } from '../contexts';
 
@@ -7,6 +7,7 @@ const nav = [
   { to: '/dashboard', label: 'Дашборд', icon: Activity },
   { to: '/risks', label: 'Реестр рисков', icon: Shield },
   { to: '/ingest', label: 'Загрузка данных', icon: UploadCloud },
+  { to: '/maintenance', label: 'ППР Заявки', icon: Wrench },
   { to: '/audit', label: 'Аудит', icon: Database },
 ];
 

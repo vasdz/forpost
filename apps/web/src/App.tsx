@@ -7,6 +7,7 @@ import { RiskOverview } from './features/risks/RiskOverview';
 import { RiskMatrixTable } from './features/risks/RiskMatrixTable';
 import { DataIngestHub } from './features/risks/DataIngestHub';
 import { AuditConsole } from './features/risks/AuditConsole';
+import { MaintenanceHub } from './features/risks/MaintenanceHub';
 import { useRisksQuery } from './api/queries';
 
 const queryClient = new QueryClient({
@@ -39,6 +40,7 @@ function App() {
               <Route path="risks" element={<RiskMatrixTableWrapper />} />
               <Route path="ingest" element={<DataIngestHub />} />
               <Route path="audit" element={<AuditConsole />} />
+              <Route path="maintenance" element={<MaintenanceHub />} />
             </Route>
           </Routes>
         </BrowserRouter>

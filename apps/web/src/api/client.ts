@@ -1,6 +1,12 @@
 import axios from 'axios';
 
-import type { AuditVerifyResponse, RiskPrediction, SecurityContext } from '../types';
+import type {
+  AuditVerifyResponse,
+  MaintenanceGenerationResponse,
+  MaintenanceOrder,
+  RiskPrediction,
+  SecurityContext,
+} from '../types';
 
 export const api = axios.create({
   baseURL: '/api/v1',
@@ -30,6 +36,34 @@ export const verifyAuditChain = async (
   const response = await api.get<AuditVerifyResponse>('/risks/audit/verify', {
     headers: buildContextHeaders(context),
   });
+
+  return response.data;
+};
+
+export const getMaintenanceOrders = async (
+  context: SecurityContext,
+): Promise<MaintenanceOrder[]> => {
+  const response = await api.get<MaintenanceOrder[]>('/maintenance', {
+    headers: buildContextHeaders(context),
+  });
+
+  return response.data;
+};
+
+export const generateMaintenanceOrders = async (
+  context: SecurityContext,
+  autoApprove: boolean = false,
+): Promise<MaintenanceGenerationResponse> => {
+  const response = await api.post<MaintenanceGenerationResponse>(
+    '/maintenance/generate-from-prediction',
+    {
+      risk_prediction_ids: [],
+      auto_approve: autoApprove,
+    },
+    {
+      headers: buildContextHeaders(context),
+    },
+  );
 
   return response.data;
 };

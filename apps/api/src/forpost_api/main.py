@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from forpost_api.routes.v1.risks import router as risks_router
+from forpost_api.routes.v1.maintenance import router as maintenance_router
 
 app = FastAPI(
     title="Форпост API",
@@ -9,6 +10,7 @@ app = FastAPI(
 )
 
 app.include_router(risks_router, prefix="/api/v1")
+app.include_router(maintenance_router, prefix="/api/v1")
 
 
 @app.get("/health")
