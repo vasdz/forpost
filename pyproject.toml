@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "forpost"
+version = "0.1.0"
+description = "Платформа предиктивного мониторинга объектов КИИ Москоллектор"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [
+    "apps/api/src",
+    "packages/domain/src",
+    "packages/prediction/src",
+    "packages/connectors/src",
+    "packages/platform/src"
+]

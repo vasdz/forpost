@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="PYTHON_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/apps/api" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/api/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/connectors" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/connectors/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/domain" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/domain/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/platform" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/platform/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/prediction" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/packages/prediction/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/.venv" />
+    </content>
+    <orderEntry type="jdk" jdkName="uv (forpost)" jdkType="Python SDK" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>
