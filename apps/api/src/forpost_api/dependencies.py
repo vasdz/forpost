@@ -3,6 +3,7 @@ import secrets
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
+from forpost_platform.security.demo_identity import DemoIdentityError, verify_demo_assertion
 from forpost_platform.security.identity import Permission, Role, SecuritySubject
 
 IDENTITY_PROVIDER_UNAVAILABLE_CODE = "IDENTITY_PROVIDER_UNAVAILABLE"
@@ -50,6 +51,23 @@ async def get_current_subject(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    presented_token = authorization.split(maxsplit=1)[1]
+    demo_secret = os.environ.get("FORPOST_DEMO_ASSERTION_SECRET", "")
+    if presented_token.startswith("demo."):
+        if os.environ.get("FORPOST_DEMO_MODE") != "1":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=identity_provider_unavailable_detail(),
+            )
+        try:
+            return verify_demo_assertion(presented_token.removeprefix("demo."), demo_secret)
+        except DemoIdentityError as error:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=unauthenticated_detail(),
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from error
+
     configured_token = os.environ.get("FORPOST_API_SERVICE_TOKEN", "")
     if len(configured_token) < 32:
         raise HTTPException(
@@ -57,7 +75,6 @@ async def get_current_subject(
             detail=identity_provider_unavailable_detail(),
         )
 
-    presented_token = authorization.split(maxsplit=1)[1]
     if not secrets.compare_digest(presented_token, configured_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -68,8 +85,9 @@ async def get_current_subject(
     return SecuritySubject(
         user_id="local-bff",
         username="local-bff",
-        role=Role.DISPATCHER,
-        allowed_districts=[],
+        roles=frozenset({Role.CENTRAL_DISPATCHER}),
+        allowed_districts=frozenset(),
+        allowed_complexes=frozenset(),
         ip_address="127.0.0.1",
     )
 
@@ -85,10 +103,13 @@ async def get_current_human_subject(
             detail=unauthenticated_detail(),
             headers={"WWW-Authenticate": "Bearer"},
         )
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=identity_provider_unavailable_detail(),
-    )
+    subject = await get_current_subject(authorization)
+    if subject.user_id == "local-bff":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=identity_provider_unavailable_detail(),
+        )
+    return subject
 
 
 def require_permission(perm: Permission):

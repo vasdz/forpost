@@ -239,8 +239,8 @@ def test_permission_dependency_blocks_dispatcher_from_future_approval_path() -> 
     isolated_app.dependency_overrides[get_current_subject] = lambda: SecuritySubject(
         user_id="dispatcher",
         username="dispatcher",
-        role=Role.DISPATCHER,
-        allowed_districts=["rek-1"],
+        roles=frozenset({Role.DISTRICT_DISPATCHER}),
+        allowed_districts=frozenset({"rek-1"}),
     )
 
     with TestClient(isolated_app) as client:
@@ -250,8 +250,8 @@ def test_permission_dependency_blocks_dispatcher_from_future_approval_path() -> 
     assert response.json() == {"detail": "Недостаточно прав для выполнения операции"}
 
 
-def test_permission_dependency_allows_analyst_to_read_audit() -> None:
-    """Отсутствующая роль analyst лишит верификацию прогноза требуемой стороны контроля."""
+def test_permission_dependency_allows_admin_to_read_audit() -> None:
+    """Администратор должен читать аудит, не получая бизнес-действия диспетчера."""
 
     isolated_app = FastAPI()
 
@@ -260,17 +260,17 @@ def test_permission_dependency_allows_analyst_to_read_audit() -> None:
         return {"user_id": subject.user_id}
 
     isolated_app.dependency_overrides[get_current_subject] = lambda: SecuritySubject(
-        user_id="analyst",
-        username="analyst",
-        role=Role.ANALYST,
-        allowed_districts=["rek-1"],
+        user_id="admin",
+        username="admin",
+        roles=frozenset({Role.SYSTEM_ADMIN}),
+        allowed_districts=frozenset({"rek-1"}),
     )
 
     with TestClient(isolated_app) as client:
         response = client.get("/audit")
 
     assert response.status_code == 200
-    assert response.json() == {"user_id": "analyst"}
+    assert response.json() == {"user_id": "admin"}
 
 
 async def _consume_request_body(

@@ -17,8 +17,8 @@ def api_client():
     app.dependency_overrides[get_current_subject] = lambda: SecuritySubject(
         user_id="test-dispatcher",
         username="test-dispatcher",
-        role=Role.DISPATCHER,
-        allowed_districts=["rek-1"],
+        roles=frozenset({Role.DISTRICT_DISPATCHER}),
+        allowed_districts=frozenset({"rek-1"}),
     )
     try:
         with TestClient(app) as client:

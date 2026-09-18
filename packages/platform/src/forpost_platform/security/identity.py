@@ -4,56 +4,74 @@ from pydantic import BaseModel, Field
 
 
 class Role(StrEnum):
-    DISPATCHER = "dispatcher"  # Диспетчер ОДС (оперативный мониторинг)
-    ANALYST = "analyst"  # Аналитик (верификация прогнозов и аудит)
-    CHIEF_ENGINEER = "chief_engineer"  # Главный инженер (согласование ордеров/заявок)
-    SECURITY_AUDITOR = "auditor"  # Офицер безопасности / Аудитор ИБ
-    SYSTEM_ADMIN = "admin"  # Администратор платформы (без прав к бизнес-действиям)
+    DISTRICT_DISPATCHER = "district_dispatcher"
+    CENTRAL_DISPATCHER = "central_dispatcher"
+    TECHNICIAN = "technician"
+    SYSTEM_ADMIN = "admin"
 
 
 class Permission(StrEnum):
     READ_TELEMETRY = "telemetry:read"
     VIEW_RISKS = "risks:view"
-    APPROVE_SERVICE_ORDER = "service_order:approve"
+    RECORD_DECISION = "incident:decide"
+    CREATE_SERVICE_DRAFT = "service_draft:create"
+    RECORD_INSPECTION = "inspection:record"
     AUDIT_READ = "audit:read"
+    MANAGE_SYSTEM = "system:manage"
+    # Сохраняются для существующих fail-closed маршрутов до их замены доменными правами.
+    APPROVE_SERVICE_ORDER = "service_order:approve"
     MANAGE_MODELS = "models:manage"
 
 
-# Матрица ролевых полномочий (RBAC)
-ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
-    Role.DISPATCHER: {Permission.READ_TELEMETRY, Permission.VIEW_RISKS},
-    Role.ANALYST: {
-        Permission.READ_TELEMETRY,
-        Permission.VIEW_RISKS,
-        Permission.AUDIT_READ,
-    },
-    Role.CHIEF_ENGINEER: {
-        Permission.READ_TELEMETRY,
-        Permission.VIEW_RISKS,
-        Permission.APPROVE_SERVICE_ORDER,
-    },
-    Role.SECURITY_AUDITOR: {Permission.AUDIT_READ},
-    Role.SYSTEM_ADMIN: {Permission.MANAGE_MODELS},
+ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
+    Role.DISTRICT_DISPATCHER: frozenset(
+        {
+            Permission.READ_TELEMETRY,
+            Permission.VIEW_RISKS,
+            Permission.RECORD_DECISION,
+            Permission.CREATE_SERVICE_DRAFT,
+        }
+    ),
+    Role.CENTRAL_DISPATCHER: frozenset(
+        {
+            Permission.READ_TELEMETRY,
+            Permission.VIEW_RISKS,
+            Permission.RECORD_DECISION,
+            Permission.CREATE_SERVICE_DRAFT,
+        }
+    ),
+    Role.TECHNICIAN: frozenset(
+        {
+            Permission.READ_TELEMETRY,
+            Permission.VIEW_RISKS,
+            Permission.RECORD_INSPECTION,
+        }
+    ),
+    Role.SYSTEM_ADMIN: frozenset({Permission.AUDIT_READ, Permission.MANAGE_SYSTEM}),
 }
 
 
 class SecuritySubject(BaseModel):
-    """Контекст субъекта доступа (Zero Trust Context)."""
+    """Проверенный сервером субъект с аддитивными ролями и областями."""
 
-    user_id: str
-    username: str
-    role: Role
-    # Атрибуты для ABAC: разрешенные зоны коллекторного хозяйства
-    allowed_districts: list[str] = Field(
-        default_factory=list, description="Разрешенные районы: e.g. ['РЭК-1', 'РЭК-3']"
-    )
-    ip_address: str = "127.0.0.1"
+    user_id: str = Field(min_length=1, max_length=128)
+    username: str = Field(min_length=1, max_length=256)
+    roles: frozenset[Role] = Field(min_length=1, max_length=4)
+    allowed_districts: frozenset[str] = Field(default_factory=frozenset, max_length=128)
+    allowed_complexes: frozenset[str] = Field(default_factory=frozenset, max_length=512)
+    ip_address: str = Field(default="127.0.0.1", max_length=64)
 
     def has_permission(self, permission: Permission) -> bool:
-        return permission in ROLE_PERMISSIONS.get(self.role, set())
+        return any(permission in ROLE_PERMISSIONS[role] for role in self.roles)
+
+    def can_access_resource(self, district: str | None, complex_id: str | None) -> bool:
+        """Проверяет серверную область без доверия к атрибутам запроса."""
+        if Role.CENTRAL_DISPATCHER in self.roles:
+            return True
+        district_allowed = district is not None and district in self.allowed_districts
+        complex_allowed = complex_id is not None and complex_id in self.allowed_complexes
+        return district_allowed or complex_allowed
 
     def can_access_collector(self, collector_district: str) -> bool:
-        """Проверка мандата на географический участок."""
-        if self.role in {Role.CHIEF_ENGINEER, Role.SECURITY_AUDITOR}:
-            return True
-        return collector_district in self.allowed_districts
+        """Совместимый вызов для существующих read-only маршрутов."""
+        return self.can_access_resource(district=collector_district, complex_id=None)

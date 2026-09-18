@@ -36,8 +36,8 @@ def client():
     subject = SecuritySubject(
         user_id="test-dispatcher",
         username="test-dispatcher",
-        role=Role.DISPATCHER,
-        allowed_districts=["rek-1"],
+        roles=frozenset({Role.DISTRICT_DISPATCHER}),
+        allowed_districts=frozenset({"rek-1"}),
     )
     app.dependency_overrides[get_current_subject] = lambda: subject
     app.dependency_overrides[get_current_human_subject] = lambda: subject

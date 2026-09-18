@@ -16,8 +16,8 @@ def test_availability_reports_real_state_without_invented_sources(tmp_path, monk
     app.dependency_overrides[get_current_subject] = lambda: SecuritySubject(
         user_id="test-dispatcher",
         username="test-dispatcher",
-        role=Role.DISPATCHER,
-        allowed_districts=["rek-1"],
+        roles=frozenset({Role.DISTRICT_DISPATCHER}),
+        allowed_districts=frozenset({"rek-1"}),
     )
     try:
         with TestClient(app) as client:
