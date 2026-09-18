@@ -4,9 +4,9 @@ import type { LocalSituationEvent } from './localSituationContract';
 import { aggregateObservedEvents } from './observedAnalytics';
 
 const events: LocalSituationEvent[] = [
-  { eventId: '1', channelId: 'a', recordedAt: '2026-08-01T10:01:00', isAlarm: true, sensorValue: '1' },
-  { eventId: '2', channelId: 'a', recordedAt: '2026-08-01T10:59:00', isAlarm: false, sensorValue: '2' },
-  { eventId: '3', channelId: 'b', recordedAt: '2026-08-01T12:00:00', isAlarm: null, sensorValue: '3' },
+  { canonicalId: '1'.repeat(64), eventId: '1', channelId: 'a', recordedAt: '2026-08-01T10:01:00', isAlarm: true, sensorValue: '1', qualityCode: 'valid', analysisEligible: true, provenance: 'observed' },
+  { canonicalId: '2'.repeat(64), eventId: '2', channelId: 'a', recordedAt: '2026-08-01T10:59:00', isAlarm: false, sensorValue: '2', qualityCode: 'valid', analysisEligible: true, provenance: 'observed' },
+  { canonicalId: '3'.repeat(64), eventId: '3', channelId: 'b', recordedAt: '2026-08-01T12:00:00', isAlarm: null, sensorValue: '3', qualityCode: 'valid', analysisEligible: true, provenance: 'observed' },
 ];
 
 describe('агрегация наблюдаемой активности', () => {

@@ -10,12 +10,26 @@ export type SourceAvailability = {
   work_permits: boolean;
 };
 
+export type Provenance = 'observed' | 'derived' | 'simulated' | 'unavailable';
+
+export type DataQuality = {
+  builtAt: string;
+  latestObservedAt: string | null;
+  eventCount: number;
+  skippedTimestampCount: number;
+  technicalAnomalyCount: number;
+  unmappedChannelCount: number;
+  objectLinkAvailable: boolean;
+  freshness: 'fresh' | 'stale' | 'historical';
+};
+
 export type LocalSituationChannel = {
   channelId: string;
   engineeringSystemType: string;
   sensorType: string;
   engineeringSystemTag: string;
   sensorName: string;
+  objectId: string | null;
 };
 
 export type LocalSituationObject = {
@@ -27,15 +41,20 @@ export type LocalSituationObject = {
 };
 
 export type LocalSituationEvent = {
+  canonicalId: string;
   eventId: string;
   channelId: string;
   recordedAt: string;
   isAlarm: boolean | null;
   sensorValue: string;
+  qualityCode: 'valid' | 'technical_anomaly' | 'alarm_with_technical_value' | 'monitoring_system_migration';
+  analysisEligible: boolean;
+  provenance: 'observed';
 };
 
 export type LocalSituationSnapshot = {
   sourceAvailability: SourceAvailability;
+  dataQuality: DataQuality;
   channels: LocalSituationChannel[];
   objects: LocalSituationObject[];
   events: LocalSituationEvent[];
@@ -43,6 +62,7 @@ export type LocalSituationSnapshot = {
 
 const SNAPSHOT_KEYS = [
   'sourceAvailability',
+  'dataQuality',
   'channels',
   'objects',
   'events',
@@ -78,6 +98,11 @@ function isBoolean(value: unknown): value is boolean {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) >= 0;
+}
+
+function isUtcTimestamp(value: unknown): value is string {
+  return isString(value) && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value)
+    && !Number.isNaN(Date.parse(value));
 }
 
 export function isObservedTimestamp(value: unknown): value is string {
@@ -116,6 +141,30 @@ function isSourceAvailability(value: unknown): value is SourceAvailability {
   return Object.values(value).every(isBoolean);
 }
 
+function isDataQuality(value: unknown): value is DataQuality {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'builtAt',
+    'latestObservedAt',
+    'eventCount',
+    'skippedTimestampCount',
+    'technicalAnomalyCount',
+    'unmappedChannelCount',
+    'objectLinkAvailable',
+    'freshness',
+  ])) {
+    return false;
+  }
+
+  return isUtcTimestamp(value.builtAt)
+    && (value.latestObservedAt === null || isObservedTimestamp(value.latestObservedAt))
+    && isNonNegativeInteger(value.eventCount)
+    && isNonNegativeInteger(value.skippedTimestampCount)
+    && isNonNegativeInteger(value.technicalAnomalyCount)
+    && isNonNegativeInteger(value.unmappedChannelCount)
+    && isBoolean(value.objectLinkAvailable)
+    && ['fresh', 'stale', 'historical'].includes(String(value.freshness));
+}
+
 function isChannel(value: unknown): value is LocalSituationChannel {
   return isRecord(value) && hasExactKeys(value, [
     'channelId',
@@ -123,7 +172,14 @@ function isChannel(value: unknown): value is LocalSituationChannel {
     'sensorType',
     'engineeringSystemTag',
     'sensorName',
-  ]) && Object.values(value).every(isString);
+    'objectId',
+  ])
+    && isString(value.channelId)
+    && isString(value.engineeringSystemType)
+    && isString(value.sensorType)
+    && isString(value.engineeringSystemTag)
+    && isString(value.sensorName)
+    && (value.objectId === null || isString(value.objectId));
 }
 
 function isObject(value: unknown): value is LocalSituationObject {
@@ -147,19 +203,29 @@ function isObject(value: unknown): value is LocalSituationObject {
 function isEvent(value: unknown): value is LocalSituationEvent {
   if (!isRecord(value) || !hasExactKeys(value, [
     'eventId',
+    'canonicalId',
     'channelId',
     'recordedAt',
     'isAlarm',
     'sensorValue',
+    'qualityCode',
+    'analysisEligible',
+    'provenance',
   ])) {
     return false;
   }
 
-  return isString(value.eventId)
+  return isString(value.canonicalId)
+    && /^[a-f0-9]{64}$/.test(value.canonicalId)
+    && isString(value.eventId)
     && isString(value.channelId)
     && isObservedTimestamp(value.recordedAt)
     && (value.isAlarm === null || isBoolean(value.isAlarm))
-    && isString(value.sensorValue);
+    && isString(value.sensorValue)
+    && ['valid', 'technical_anomaly', 'alarm_with_technical_value', 'monitoring_system_migration']
+      .includes(String(value.qualityCode))
+    && isBoolean(value.analysisEligible)
+    && value.provenance === 'observed';
 }
 
 export function isLocalSituationSnapshot(value: unknown): value is LocalSituationSnapshot {
@@ -167,14 +233,26 @@ export function isLocalSituationSnapshot(value: unknown): value is LocalSituatio
     return false;
   }
 
-  return isSourceAvailability(value.sourceAvailability)
-    && Array.isArray(value.channels)
-    && value.channels.every(isChannel)
-    && Array.isArray(value.objects)
-    && value.objects.every(isObject)
-    && Array.isArray(value.events)
-    && value.events.length <= MAX_OBSERVED_EVENTS
-    && value.events.every(isEvent);
+  if (!isSourceAvailability(value.sourceAvailability)
+    || !isDataQuality(value.dataQuality)) {
+    return false;
+  }
+
+  if (!Array.isArray(value.channels)
+    || !value.channels.every(isChannel)
+    || !Array.isArray(value.objects)
+    || !value.objects.every(isObject)
+    || !Array.isArray(value.events)
+    || value.events.length > MAX_OBSERVED_EVENTS
+    || !value.events.every(isEvent)) {
+    return false;
+  }
+
+  const unmappedChannels = value.channels.filter((channel) => channel.objectId === null).length;
+  return value.dataQuality.eventCount === value.events.length
+    && value.dataQuality.technicalAnomalyCount <= value.events.length
+    && value.dataQuality.unmappedChannelCount === unmappedChannels
+    && (value.dataQuality.objectLinkAvailable || unmappedChannels === value.channels.length);
 }
 
 function isLegacySourceMetadata(value: unknown): boolean {
@@ -210,6 +288,7 @@ export function normalizeStoredLocalSituationSnapshot(
 
   const snapshotCandidate: unknown = {
     sourceAvailability: value.sourceAvailability,
+    dataQuality: value.dataQuality,
     channels: value.channels,
     objects: value.objects,
     events: value.events,

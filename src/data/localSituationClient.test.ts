@@ -12,12 +12,23 @@ const observedSnapshot = {
     ml_predictions: false,
     work_permits: false,
   },
+  dataQuality: {
+    builtAt: '2026-09-18T10:00:00Z',
+    latestObservedAt: '2026-08-01T23:59:58',
+    eventCount: 1,
+    skippedTimestampCount: 0,
+    technicalAnomalyCount: 0,
+    unmappedChannelCount: 1,
+    objectLinkAvailable: false,
+    freshness: 'historical',
+  },
   channels: [{
     channelId: 'channel-1',
     engineeringSystemType: 'system',
     sensorType: 'sensor',
     engineeringSystemTag: 'tag',
     sensorName: 'name',
+    objectId: null,
   }],
   objects: [{
     objectId: 'object-1',
@@ -27,16 +38,20 @@ const observedSnapshot = {
     dispatcherName: 'name',
   }],
   events: [{
+    canonicalId: 'a'.repeat(64),
     eventId: 'event-1',
     channelId: 'channel-1',
     recordedAt: '2026-08-01T23:59:58',
     isAlarm: true,
     sensorValue: 'value',
+    qualityCode: 'valid',
+    analysisEligible: true,
+    provenance: 'observed',
   }],
 };
 
 describe('fetchLocalSituation', () => {
-  it('читает только относительный локальный маршрут без кеша и валидирует публичный снимок без provenance', async () => {
+  it('читает только относительный локальный маршрут без кеша и валидирует provenance', async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(observedSnapshot), { status: 200 }));
 
     await expect(fetchLocalSituation(fetcher)).resolves.toEqual({ status: 'ready', snapshot: observedSnapshot });

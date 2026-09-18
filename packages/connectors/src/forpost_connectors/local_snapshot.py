@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import heapq
 import json
 import re
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -23,10 +24,11 @@ PROCESSED_DATA_ROOT: Final[Path] = PROJECT_ROOT / "data" / "processed"
 MAX_SUPPLEMENTAL_JOURNAL_BYTES: Final[int] = 32 * 1024 * 1024
 MAX_EVENTS: Final[int] = 500
 MAX_CSV_FILES: Final[int] = 64
-MAX_CSV_FILE_BYTES: Final[int] = 64 * 1024 * 1024
-MAX_CSV_TOTAL_BYTES: Final[int] = 256 * 1024 * 1024
-MAX_CSV_ROWS: Final[int] = 500_000
-MAX_CSV_TOTAL_ROWS: Final[int] = 600_000
+# Ограничения остаются конечными, но учитывают фактические годовые выгрузки.
+MAX_CSV_FILE_BYTES: Final[int] = 4 * 1024 * 1024 * 1024
+MAX_CSV_TOTAL_BYTES: Final[int] = 32 * 1024 * 1024 * 1024
+MAX_CSV_ROWS: Final[int] = 8_000_000
+MAX_CSV_TOTAL_ROWS: Final[int] = 8_500_000
 MAX_CSV_FIELD_CHARS: Final[int] = 1_024
 EVENT_CHUNK_ROWS: Final[int] = 10_000
 # Должен совпадать с максимумом, который принимает Next.js-маршрут снимка.
@@ -53,6 +55,7 @@ CHANNEL_HEADERS: Final[frozenset[str]] = frozenset(
         "название_датчика",
     }
 )
+UPDATED_CHANNEL_HEADERS: Final[frozenset[str]] = CHANNEL_HEADERS | {"ид_объект"}
 OBJECT_HEADERS: Final[frozenset[str]] = frozenset(
     {
         "ид_объект",
@@ -82,12 +85,27 @@ class SourceMetadata:
 
 
 @dataclass(frozen=True)
+class DataQuality:
+    """Безопасные агрегаты качества, разрешённые для публичного UI."""
+
+    built_at: str
+    latest_observed_at: str | None
+    event_count: int
+    skipped_timestamp_count: int
+    technical_anomaly_count: int
+    unmapped_channel_count: int
+    object_link_available: bool
+    freshness: str
+
+
+@dataclass(frozen=True)
 class ChannelRegistryEntry:
     channel_id: str
     engineering_system_type: str
     sensor_type: str
     engineering_system_tag: str
     sensor_name: str
+    object_id: str | None
 
 
 @dataclass(frozen=True)
@@ -101,11 +119,15 @@ class ObjectRegistryEntry:
 
 @dataclass(frozen=True)
 class ObservedEvent:
+    canonical_id: str
     event_id: str
     channel_id: str
     recorded_at: str
     is_alarm: bool | None
     sensor_value: str
+    quality_code: str
+    analysis_eligible: bool
+    provenance: str
 
 
 @dataclass(frozen=True)
@@ -113,6 +135,7 @@ class LocalSituationSnapshot:
     """Минимальный локальный снимок наблюдаемых событий, без ML-прогнозов."""
 
     source_metadata: SourceMetadata
+    data_quality: DataQuality
     source_availability: dict[str, bool]
     channels: tuple[ChannelRegistryEntry, ...]
     objects: tuple[ObjectRegistryEntry, ...]
@@ -122,6 +145,7 @@ class LocalSituationSnapshot:
         """Сериализует публичный контракт без путей и агрегатов первичных данных."""
         return {
             "sourceAvailability": self.source_availability,
+            "dataQuality": _camel_case(asdict(self.data_quality)),
             "channels": [_camel_case(asdict(channel)) for channel in self.channels],
             "objects": [_camel_case(asdict(obj)) for obj in self.objects],
             "events": [_camel_case(asdict(event)) for event in self.events],
@@ -143,8 +167,10 @@ def build_local_snapshot(
         (*selected_journals, discovered["channels"], discovered["objects"])
     )
 
-    channels = _read_channels(discovered["channels"])
     objects = _read_objects(discovered["objects"])
+    channels, object_link_available = _read_channels(
+        discovered["channels"], {item.object_id for item in objects}
+    )
     events, scanned_event_count, skipped_event_count = _read_latest_events(
         selected_journals, max_events
     )
@@ -158,6 +184,19 @@ def build_local_snapshot(
             channel_count=len(channels),
             object_count=len(objects),
             latest_observed_at=latest_observed_at,
+        ),
+        data_quality=DataQuality(
+            built_at=datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            latest_observed_at=latest_observed_at,
+            event_count=len(events),
+            skipped_timestamp_count=skipped_event_count,
+            technical_anomaly_count=sum(
+                event.quality_code in {"technical_anomaly", "alarm_with_technical_value"}
+                for event in events
+            ),
+            unmapped_channel_count=sum(channel.object_id is None for channel in channels),
+            object_link_available=object_link_available,
+            freshness="historical",
         ),
         source_availability={
             "events": True,
@@ -227,7 +266,7 @@ def _detect_csv_role(path: Path) -> str:
     headers = frozenset(normalized_header)
     if headers == EVENT_HEADERS:
         return "journal"
-    if headers == CHANNEL_HEADERS:
+    if headers in {CHANNEL_HEADERS, UPDATED_CHANNEL_HEADERS}:
         return "channels"
     if headers == OBJECT_HEADERS:
         return "objects"
@@ -275,14 +314,20 @@ def _select_journals(journals: tuple[Path, ...]) -> tuple[Path, ...]:
     return (*latest, *sorted(supplemental))
 
 
-def _read_channels(path: Path) -> tuple[ChannelRegistryEntry, ...]:
+def _read_channels(
+    path: Path, object_ids: set[str]
+) -> tuple[tuple[ChannelRegistryEntry, ...], bool]:
     records: list[ChannelRegistryEntry] = []
     identifiers: set[str] = set()
+    object_link_available = _read_header_set(path) == UPDATED_CHANNEL_HEADERS
     for row in _read_rows(path):
         channel_id = _required(row, "ид_канала_данных")
         if channel_id in identifiers:
             raise SourceSnapshotError("Справочник каналов содержит дубликат идентификатора")
         identifiers.add(channel_id)
+        object_id = row.get("ид_объект") or None
+        if object_id is not None and object_id not in object_ids:
+            raise SourceSnapshotError("Справочник каналов ссылается на несуществующий объект")
         records.append(
             ChannelRegistryEntry(
                 channel_id=channel_id,
@@ -290,9 +335,10 @@ def _read_channels(path: Path) -> tuple[ChannelRegistryEntry, ...]:
                 sensor_type=_required(row, "тип_датчика"),
                 engineering_system_tag=_required(row, "тег_инженерной_системы"),
                 sensor_name=_required(row, "название_датчика"),
+                object_id=object_id,
             )
         )
-    return tuple(records)
+    return tuple(records), object_link_available
 
 
 def _read_objects(path: Path) -> tuple[ObjectRegistryEntry, ...]:
@@ -325,19 +371,37 @@ def _read_latest_events(
     for path in journals:
         for chunk in _read_event_chunks(path):
             scanned_event_count += len(chunk)
+            complete_rows = (
+                chunk[list(EVENT_HEADERS)]
+                .fillna("")
+                .apply(lambda column: column.astype(str).str.len() > 0)
+                .all(axis=1)
+            )
             timestamps = _parse_chunk_timestamps(chunk)
-            skipped_event_count += int(timestamps.isna().sum())
-            timestamps = timestamps.dropna()
+            invalid_rows = timestamps.isna() | ~complete_rows
+            skipped_event_count += int(invalid_rows.sum())
+            timestamps = timestamps.loc[~invalid_rows]
             for offset, index in enumerate(
                 timestamps.nlargest(min(max_events, len(chunk))).index, start=1
             ):
                 recorded_at = timestamps.loc[index].to_pydatetime()
+                event_id = _required_value(chunk.at[index, "ид_события"])
+                channel_id = _required_value(chunk.at[index, "ид_канала_данных"])
+                is_alarm = _parse_alarm(chunk.at[index, "тревожное"])
+                sensor_value = _required_value(chunk.at[index, "значение_датчика"])
+                quality_code, analysis_eligible = _classify_event_quality(
+                    sensor_value, is_alarm, recorded_at
+                )
                 event = ObservedEvent(
-                    event_id=_required_value(chunk.at[index, "ид_события"]),
-                    channel_id=_required_value(chunk.at[index, "ид_канала_данных"]),
+                    canonical_id=_canonical_event_id(event_id, channel_id, recorded_at),
+                    event_id=event_id,
+                    channel_id=channel_id,
                     recorded_at=recorded_at.isoformat(timespec="seconds"),
-                    is_alarm=_parse_alarm(chunk.at[index, "тревожное"]),
-                    sensor_value=_required_value(chunk.at[index, "значение_датчика"]),
+                    is_alarm=is_alarm,
+                    sensor_value=sensor_value,
+                    quality_code=quality_code,
+                    analysis_eligible=analysis_eligible,
+                    provenance="observed",
                 )
                 candidate = (recorded_at, scanned_event_count - len(chunk) + offset, event)
                 if len(heap) < max_events:
@@ -399,7 +463,7 @@ def _validate_journal_rows(path: Path) -> None:
         ):
             raise SourceSnapshotError("Журнал событий не соответствует документированной схеме")
         for row in reader:
-            if len(row) != len(EVENT_HEADERS):
+            if len(row) > len(EVENT_HEADERS):
                 raise SourceSnapshotError("Строка журнала имеет неверное число полей")
 
 
@@ -481,6 +545,34 @@ def _parse_alarm(value: str | None) -> bool | None:
     return numeric_value != Decimal(0)
 
 
+def _classify_event_quality(
+    sensor_value: str, is_alarm: bool | None, recorded_at: datetime
+) -> tuple[str, bool]:
+    """Применяет утверждённые правила пригодности без изменения исходного значения."""
+    if recorded_at.year == 2021:
+        return "monitoring_system_migration", False
+    normalized = sensor_value.strip().casefold()
+    if normalized in {
+        "-3276",
+        "-127",
+        "-100",
+        "-255",
+        "01.01.1970 03:00:00",
+        "1970-01-01t03:00:00",
+    }:
+        if is_alarm is True:
+            return "alarm_with_technical_value", True
+        return "technical_anomaly", False
+    return "valid", True
+
+
+def _canonical_event_id(event_id: str, channel_id: str, recorded_at: datetime) -> str:
+    identity = "\0".join(
+        ("smvu-v1", event_id, channel_id, recorded_at.isoformat(timespec="seconds"))
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 def _required(row: dict[str, str | None], field: str) -> str:
     return _required_value(row[field])
 
@@ -493,6 +585,14 @@ def _required_value(value: str | None) -> str:
 
 def _normalize_header(value: str) -> str:
     return value.removeprefix("\ufeff")
+
+
+def _read_header_set(path: Path) -> frozenset[str]:
+    with _bounded_csv_field_limit(), path.open("r", encoding="utf-8-sig", newline="") as stream:
+        header = next(csv.reader(stream), None)
+    if header is None:
+        raise SourceSnapshotError("Пустой CSV не соответствует документированной схеме")
+    return frozenset(_normalize_header(value) for value in header)
 
 
 def _guard_directory(value: Path, allowed_root: Path, label: str) -> Path:

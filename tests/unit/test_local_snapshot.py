@@ -23,6 +23,7 @@ CHANNEL_HEADERS = [
     "тег_инженерной_системы",
     "название_датчика",
 ]
+UPDATED_CHANNEL_HEADERS = [*CHANNEL_HEADERS, "ид_объект"]
 OBJECT_HEADERS = [
     "ид_объект",
     "иерархия_уровень",
@@ -324,25 +325,35 @@ def test_builder_marks_nonfinite_decimal_alarm_as_unavailable(monkeypatch, tmp_p
     assert snapshot.events[0].is_alarm is None
 
 
-@pytest.mark.parametrize(
-    "row_values",
-    [
-        ["1", "20", "2026-08-01", "10:00:00", "0"],
-        ["1", "20", "2026-08-01", "10:00:00", "0", "7", "extra"],
-    ],
-)
-def test_builder_rejects_journal_row_with_wrong_field_count(monkeypatch, tmp_path, row_values):
-    """Ловит сдвиг полей журнала при строке не из шести значений."""
+def test_builder_rejects_journal_row_with_extra_fields(monkeypatch, tmp_path):
+    """Ловит сдвиг полей журнала при строке с лишними значениями."""
     raw_root, output_path = configure_local_roots(monkeypatch, tmp_path)
     write_valid_sources(raw_root)
     journal_path = raw_root / "ext-journal-2026.csv"
     with journal_path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(EVENT_HEADERS)
-        writer.writerow(row_values)
+        writer.writerow(["1", "20", "2026-08-01", "10:00:00", "0", "7", "extra"])
 
     with pytest.raises(SourceSnapshotError, match="число полей"):
         build_local_snapshot(raw_root, output_path)
+
+
+def test_builder_skips_incomplete_journal_row_and_reports_it(monkeypatch, tmp_path):
+    """Не останавливает весь источник из-за одной укороченной строки."""
+    raw_root, output_path = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(raw_root)
+    journal_path = raw_root / "ext-journal-2026.csv"
+    with journal_path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(EVENT_HEADERS)
+        writer.writerow(["broken", "20", "2026-08-01", "10:00:00"])
+        writer.writerow(["valid", "20", "2026-08-01", "10:01:00", "1", "7"])
+
+    snapshot = build_local_snapshot(raw_root, output_path)
+
+    assert [event.event_id for event in snapshot.events] == ["valid"]
+    assert snapshot.data_quality.skipped_timestamp_count == 1
 
 
 def test_builder_rejects_max_events_above_public_snapshot_limit(monkeypatch, tmp_path):
@@ -567,3 +578,152 @@ def test_builder_rejects_output_path_traversal(monkeypatch, tmp_path):
 
     with pytest.raises(SourceSnapshotError, match="data/processed"):
         build_local_snapshot(raw_root, escaped_output)
+
+
+def test_builder_marks_legacy_channels_as_unmapped(monkeypatch, tmp_path):
+    """Ловит выдуманную связь канала с объектом для старой схемы справочника."""
+    raw_root, output_path = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(raw_root)
+
+    snapshot = build_local_snapshot(raw_root, output_path)
+
+    assert snapshot.channels[0].object_id is None
+    assert snapshot.data_quality.object_link_available is False
+    assert snapshot.data_quality.unmapped_channel_count == 1
+
+
+def test_builder_accepts_updated_channel_object_link(monkeypatch, tmp_path):
+    """Ловит потерю подтверждённой связи из обновлённого справочника каналов."""
+    raw_root, output_path = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(raw_root)
+    write_csv(
+        raw_root / "channels.csv",
+        UPDATED_CHANNEL_HEADERS,
+        [
+            {
+                "ид_канала_данных": "20",
+                "тип_инж_системы": "ventilation",
+                "тип_датчика": "smoke",
+                "тег_инженерной_системы": "node-20",
+                "название_датчика": "Smoke 20",
+                "ид_объект": "5",
+            }
+        ],
+    )
+
+    snapshot = build_local_snapshot(raw_root, output_path)
+
+    assert snapshot.channels[0].object_id == "5"
+    assert snapshot.data_quality.object_link_available is True
+    assert snapshot.data_quality.unmapped_channel_count == 0
+
+
+def test_builder_rejects_unknown_channel_object_link(monkeypatch, tmp_path):
+    """Не допускает несуществующий объект через обновлённую связь справочника."""
+    raw_root, output_path = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(raw_root)
+    write_csv(
+        raw_root / "channels.csv",
+        UPDATED_CHANNEL_HEADERS,
+        [
+            {
+                "ид_канала_данных": "20",
+                "тип_инж_системы": "ventilation",
+                "тип_датчика": "smoke",
+                "тег_инженерной_системы": "node-20",
+                "название_датчика": "Smoke 20",
+                "ид_объект": "missing-object",
+            }
+        ],
+    )
+
+    with pytest.raises(SourceSnapshotError, match="несуществующий объект"):
+        build_local_snapshot(raw_root, output_path)
+
+
+@pytest.mark.parametrize(
+    ("alarm", "quality_code", "analysis_eligible"),
+    [("0", "technical_anomaly", False), ("1", "alarm_with_technical_value", True)],
+)
+def test_builder_classifies_technical_sensor_values(
+    monkeypatch, tmp_path, alarm, quality_code, analysis_eligible
+):
+    """Защищает различие нетревожной ошибки и тревоги с техническим значением."""
+    raw_root, output_path = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(
+        raw_root,
+        events=[
+            {
+                "ид_события": "technical-event",
+                "ид_канала_данных": "20",
+                "дата": "2026-08-01",
+                "время": "10:00:00",
+                "тревожное": alarm,
+                "значение_датчика": "-3276",
+            }
+        ],
+    )
+
+    snapshot = build_local_snapshot(raw_root, output_path)
+
+    assert snapshot.events[0].quality_code == quality_code
+    assert snapshot.events[0].analysis_eligible is analysis_eligible
+    assert snapshot.events[0].provenance == "observed"
+    assert snapshot.data_quality.technical_anomaly_count == 1
+
+
+def test_builder_excludes_2021_migration_period_from_analytics(monkeypatch, tmp_path):
+    """Не даёт загрязнённому миграцией периоду молча войти в ML-набор."""
+    raw_root, output_path = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(
+        raw_root,
+        events=[
+            {
+                "ид_события": "migration-event",
+                "ид_канала_данных": "20",
+                "дата": "2021-06-01",
+                "время": "10:00:00",
+                "тревожное": "1",
+                "значение_датчика": "42",
+            }
+        ],
+    )
+    (raw_root / "ext-journal-2026.csv").rename(raw_root / "ext-journal-2021.csv")
+
+    snapshot = build_local_snapshot(raw_root, output_path)
+
+    assert snapshot.events[0].quality_code == "monitoring_system_migration"
+    assert snapshot.events[0].analysis_eligible is False
+
+
+def test_builder_creates_stable_composite_event_identity(monkeypatch, tmp_path):
+    """Ловит коллизию неуникального исходного ID у разных наблюдений."""
+    raw_root, output_path = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(
+        raw_root,
+        events=[
+            {
+                "ид_события": "duplicate",
+                "ид_канала_данных": "20",
+                "дата": "2026-08-01",
+                "время": "10:00:00",
+                "тревожное": "1",
+                "значение_датчика": "42",
+            },
+            {
+                "ид_события": "duplicate",
+                "ид_канала_данных": "20",
+                "дата": "2026-08-01",
+                "время": "10:01:00",
+                "тревожное": "1",
+                "значение_датчика": "43",
+            },
+        ],
+    )
+
+    first = build_local_snapshot(raw_root, output_path)
+    second = build_local_snapshot(raw_root, output_path)
+
+    assert first.events[0].canonical_id == second.events[0].canonical_id
+    assert first.events[0].canonical_id != first.events[1].canonical_id
+    assert len(first.events[0].canonical_id) == 64

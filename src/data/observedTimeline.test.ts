@@ -4,10 +4,10 @@ import type { LocalSituationEvent } from './localSituationContract';
 import { selectObservedEventsAtTimeline } from './observedTimeline';
 
 const events: LocalSituationEvent[] = [
-  { eventId: 'old', channelId: 'c-1', recordedAt: '2026-08-01T08:00:00', isAlarm: false, sensorValue: '0' },
-  { eventId: 'start', channelId: 'c-1', recordedAt: '2026-08-01T12:00:00', isAlarm: false, sensorValue: '1' },
-  { eventId: 'current', channelId: 'c-2', recordedAt: '2026-08-02T06:00:00', isAlarm: true, sensorValue: '2' },
-  { eventId: 'future', channelId: 'c-2', recordedAt: '2026-08-02T12:00:00', isAlarm: true, sensorValue: '3' },
+  { canonicalId: '1'.repeat(64), eventId: 'old', channelId: 'c-1', recordedAt: '2026-08-01T08:00:00', isAlarm: false, sensorValue: '0', qualityCode: 'valid', analysisEligible: true, provenance: 'observed' },
+  { canonicalId: '2'.repeat(64), eventId: 'start', channelId: 'c-1', recordedAt: '2026-08-01T12:00:00', isAlarm: false, sensorValue: '1', qualityCode: 'valid', analysisEligible: true, provenance: 'observed' },
+  { canonicalId: '3'.repeat(64), eventId: 'current', channelId: 'c-2', recordedAt: '2026-08-02T06:00:00', isAlarm: true, sensorValue: '2', qualityCode: 'valid', analysisEligible: true, provenance: 'observed' },
+  { canonicalId: '4'.repeat(64), eventId: 'future', channelId: 'c-2', recordedAt: '2026-08-02T12:00:00', isAlarm: true, sensorValue: '3', qualityCode: 'valid', analysisEligible: true, provenance: 'observed' },
 ];
 
 describe('выбор наблюдений по общей временной шкале', () => {

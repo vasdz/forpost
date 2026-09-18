@@ -11,7 +11,7 @@ import {
 } from './localSituation';
 import { GET } from '@/app/api/local-situation/route';
 
-const validSnapshot = {
+const validSnapshot: LocalSituationSnapshot = {
   sourceAvailability: {
     events: true,
     channels: true,
@@ -21,6 +21,16 @@ const validSnapshot = {
     ml_predictions: false,
     work_permits: false,
   },
+  dataQuality: {
+    builtAt: '2026-09-18T10:00:00Z',
+    latestObservedAt: '2026-08-01T23:59:58',
+    eventCount: 1,
+    skippedTimestampCount: 0,
+    technicalAnomalyCount: 0,
+    unmappedChannelCount: 1,
+    objectLinkAvailable: false,
+    freshness: 'historical',
+  },
   channels: [
     {
       channelId: 'test-channel',
@@ -28,6 +38,7 @@ const validSnapshot = {
       sensorType: 'test-sensor',
       engineeringSystemTag: 'test-tag',
       sensorName: 'test-name',
+      objectId: null,
     },
   ],
   objects: [
@@ -41,17 +52,22 @@ const validSnapshot = {
   ],
   events: [
     {
+      canonicalId: 'a'.repeat(64),
       eventId: 'test-event',
       channelId: 'test-channel',
       recordedAt: '2026-08-01T23:59:58',
       isAlarm: true,
       sensorValue: 'test-value',
+      qualityCode: 'valid',
+      analysisEligible: true,
+      provenance: 'observed',
     },
   ],
 };
 
 const publicSnapshot: LocalSituationSnapshot = {
   sourceAvailability: validSnapshot.sourceAvailability,
+  dataQuality: validSnapshot.dataQuality,
   channels: validSnapshot.channels,
   objects: validSnapshot.objects,
   events: validSnapshot.events,
@@ -126,6 +142,28 @@ describe.sequential('локальный снимок ситуации', () => {
       code: 'LOCAL_SITUATION_UNAVAILABLE',
       message: 'Локальный снимок данных недоступен.',
     });
+  });
+
+  it('отклоняет событие с неподтверждённым происхождением', async () => {
+    await writeSnapshot({
+      ...validSnapshot,
+      events: [{ ...validSnapshot.events[0], provenance: 'guessed' }],
+    });
+
+    await expect(getLocalSituationSnapshot()).rejects.toBeInstanceOf(
+      LocalSituationUnavailableError,
+    );
+  });
+
+  it('отклоняет несогласованный агрегат числа событий', async () => {
+    await writeSnapshot({
+      ...validSnapshot,
+      dataQuality: { ...validSnapshot.dataQuality, eventCount: 2 },
+    });
+
+    await expect(getLocalSituationSnapshot()).rejects.toBeInstanceOf(
+      LocalSituationUnavailableError,
+    );
   });
 
   it('принимает известный legacy-конверт, но не выдаёт служебные метаданные', async () => {
