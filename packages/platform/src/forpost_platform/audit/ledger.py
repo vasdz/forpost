@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel
@@ -34,7 +34,11 @@ class AuditRecord(BaseModel):
 
 
 class ImmutableAuditLedger:
-    """Криптографический реестр аудита с защитой от изменения задним числом."""
+    """Внутрипроцессный криптографический реестр без WORM-гарантий.
+
+    Реализация хранит цепочку только в памяти и не является неизменяемым
+    production-хранилищем аудита.
+    """
 
     def __init__(self):
         self._chain: list[AuditRecord] = []
@@ -48,7 +52,7 @@ class ImmutableAuditLedger:
         resource_id: str,
         details: dict,
     ) -> AuditRecord:
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
         index = len(self._chain)
 
         # Нормализация данных для детерминированного хеша
@@ -85,7 +89,13 @@ class ImmutableAuditLedger:
         return record
 
     def verify_integrity(self) -> bool:
-        """Аудит целостности реестра — подтверждает отсутствие правок."""
+        """Проверяет записи и совпадение хвоста с сохранённой головой цепочки.
+
+        Проверка обнаруживает локальное усечение, пока ``_last_hash`` хранится
+        отдельно от списка записей. Для доказательства против одновременной
+        подмены списка и головы production-хранилище обязано закреплять голову
+        во внешнем WORM-хранилище или доверенной системе аудита.
+        """
         expected_prev = "GENESIS_BLOCK_FORPOST_KII_2026"
         for rec in self._chain:
             if rec.prev_hash != expected_prev:
@@ -106,7 +116,7 @@ class ImmutableAuditLedger:
             if hashlib.sha256(payload.encode("utf-8")).hexdigest() != rec.record_hash:
                 return False
             expected_prev = rec.record_hash
-        return True
+        return expected_prev == self._last_hash
 
 
 # Глобальный инстанс реестра аудита

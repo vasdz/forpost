@@ -9,19 +9,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         response = await call_next(request)
 
-        # Полный запрет исполнения сторонних небезопасных скриптов (Anti-XSS)
+        # API отдаёт только данные, поэтому не допускает активный контент и встраивание.
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; "
-            "frame-ancestors 'none';"
+            "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';"
         )
 
         # Защита от кликджекинга и подмены MIME
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=()"
 
         if request.url.path.startswith("/api/"):

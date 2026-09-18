@@ -1,8 +1,8 @@
 """Юнит-тесты для модуля превентивного обслуживания."""
 
-import pytest
 from datetime import UTC, datetime
 
+import pytest
 from forpost_domain.maintenance.entities import (
     MaintenanceOrder,
     MaintenancePriority,
@@ -10,10 +10,9 @@ from forpost_domain.maintenance.entities import (
 )
 from forpost_domain.risks.entities import RiskCategory, RiskPrediction
 from forpost_platform.maintenance.generator import (
-    MaintenanceRegulator,
     MaintenanceOrderStore,
+    MaintenanceRegulator,
 )
-from forpost_prediction_core.mock_predictor import MockRiskPredictor
 
 
 @pytest.mark.parametrize(
@@ -41,9 +40,17 @@ def test_priority_from_probability(probability: float, expected_priority: Mainte
     ],
 )
 def test_order_generation_from_all_categories(category: RiskCategory):
-    """Проверка генерации заявок по всем 4 категориям рисков."""
-    predictor = MockRiskPredictor(category)
-    prediction = predictor.predict(target_id="test-target", context_data={})
+    """Регламент строит заявку по тестовому доменному прогнозу без генератора-заглушки."""
+    prediction = RiskPrediction(
+        prediction_id=f"test-{category.value}",
+        target_id="test-target",
+        category=category,
+        probability=0.75,
+        horizon_hours=24,
+        calculated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        model_version="test-fixture",
+        explanation="Локальная тестовая запись для проверки регламента.",
+    )
 
     order = MaintenanceRegulator.generate_order_from_risk(prediction, model_version="0.1.0")
 

@@ -4,8 +4,11 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111.0",
+    "slowapi>=0.1.9,<0.2",
+    "typing-extensions>=4.16.0",
     "uvicorn>=0.30.0",
     "forpost-domain",
+    "forpost-platform",
     "forpost-prediction-core"
 ]
 

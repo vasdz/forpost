@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class Role(StrEnum):
     DISPATCHER = "dispatcher"  # Диспетчер ОДС (оперативный мониторинг)
+    ANALYST = "analyst"  # Аналитик (верификация прогнозов и аудит)
     CHIEF_ENGINEER = "chief_engineer"  # Главный инженер (согласование ордеров/заявок)
     SECURITY_AUDITOR = "auditor"  # Офицер безопасности / Аудитор ИБ
     SYSTEM_ADMIN = "admin"  # Администратор платформы (без прав к бизнес-действиям)
@@ -21,6 +22,11 @@ class Permission(StrEnum):
 # Матрица ролевых полномочий (RBAC)
 ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
     Role.DISPATCHER: {Permission.READ_TELEMETRY, Permission.VIEW_RISKS},
+    Role.ANALYST: {
+        Permission.READ_TELEMETRY,
+        Permission.VIEW_RISKS,
+        Permission.AUDIT_READ,
+    },
     Role.CHIEF_ENGINEER: {
         Permission.READ_TELEMETRY,
         Permission.VIEW_RISKS,

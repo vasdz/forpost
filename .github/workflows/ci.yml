@@ -1,24 +1,155 @@
-name: Forpost CI/CD & Security Gates
+name: Forpost CI and Security Gates
 
 on:
-  push:
-    branches: [ master, main, develop ]
-  pull_request:
-    branches: [ master, main ]
+  push: {}
+  pull_request: {}
 
 permissions:
   contents: read
 
 jobs:
-  lint-and-format:
-    name: 1. Анализ синтаксиса и форматирования (Ruff)
+  perimeter-guard:
+    name: Perimeter guard
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Block committed data and oversized files
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+            head_sha="${{ github.event.pull_request.head.sha }}"
+            node scripts/pre-commit-guard.mjs --range "${base_sha}..${head_sha}"
+          elif [[ "${{ github.event.before }}" =~ ^0+$ ]]; then
+            default_branch="${{ github.event.repository.default_branch }}"
+            git fetch origin "${default_branch}:refs/remotes/origin/${default_branch}" || true
+            if git show-ref --verify --quiet "refs/remotes/origin/${default_branch}"; then
+              node scripts/pre-commit-guard.mjs --new-branch-range "origin/${default_branch}" "${{ github.sha }}"
+            else
+              node scripts/pre-commit-guard.mjs --range "${{ github.sha }}"
+            fi
+          else
+            node scripts/pre-commit-guard.mjs --range "${{ github.event.before }}..${{ github.sha }}"
+          fi
+
+  frontend-lint:
+    name: Frontend lint
+    needs: perimeter-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run ESLint with security and accessibility rules
+        run: npm run lint
+
+  frontend-typecheck:
+    name: Frontend typecheck
+    needs: perimeter-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run TypeScript typecheck
+        run: npm run typecheck
+
+  frontend-unit:
+    name: Frontend unit tests
+    needs: perimeter-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install coverage provider
+        run: npm install --no-save --package-lock=false --ignore-scripts @vitest/coverage-v8@3.2.4
+
+      - name: Run unit tests with coverage
+        run: npm run test:coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: frontend-coverage
+          path: coverage/
+          if-no-files-found: warn
+
+      - name: Upload Playwright report when e2e tests create one
+        if: ${{ always() && hashFiles('playwright-report/**') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: playwright-report
+          path: playwright-report/
+
+  frontend-build:
+    name: Frontend build
+    needs: perimeter-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+  python-ruff:
+    name: Python Ruff
+    needs: perimeter-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
           cache: "pip"
@@ -28,62 +159,137 @@ jobs:
           python -m pip install --upgrade pip
           pip install ruff
 
-      - name: Run Ruff (Linter & Formatter Check)
+      - name: Run Ruff
         run: |
           ruff check .
           ruff format --check .
 
-  security-gates:
-    name: 2. Контроль безопасности (SAST, SCA, Semgrep)
+  python-bandit:
+    name: Python Bandit
+    needs: perimeter-guard
     runs-on: ubuntu-latest
-    needs: lint-and-format
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
 
-      - name: Install Core & Workspace Packages
+      - name: Install Bandit
         run: |
           python -m pip install --upgrade pip
-          pip install bandit pip-audit semgrep hatchling editables
-          pip install pydantic fastapi slowapi starlette openpyxl pandas
-          pip install --no-build-isolation -e ./packages/domain -e ./packages/prediction -e ./packages/connectors -e ./packages/platform -e ./apps/api
+          pip install bandit
 
-      - name: Run SAST (Bandit)
-        run: |
-          bandit -r apps packages -c .bandit.yaml
+      - name: Run Bandit
+        run: bandit -r apps packages -c .bandit.yaml
 
-      - name: Run SCA (Pip-Audit)
-        run: |
-          pip-audit --desc
-
-      - name: Run Semgrep (OWASP Top-10 & Secrets)
-        run: |
-          semgrep scan --config "p/security-audit" --config "p/secrets" --error apps packages
-
-  unit-and-integration-tests:
-    name: 3. Тестирование контрактов и моделей (Pytest)
+  python-tests:
+    name: Python tests
+    needs: perimeter-guard
     runs-on: ubuntu-latest
-    needs: security-gates
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
 
-      - name: Install Dependencies
+      - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
           pip install hatchling editables pytest httpx fastapi slowapi uvicorn pydantic pandas openpyxl
           pip install --no-build-isolation -e ./packages/domain -e ./packages/prediction -e ./packages/connectors -e ./packages/platform -e ./apps/api
 
-      - name: Run Test Suite (Contracts, CDR, ABAC, WORM Ledger)
+      - name: Run Python tests
+        run: pytest tests -v
+
+  semgrep:
+    name: Semgrep SARIF
+    needs: perimeter-guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
         run: |
-          pytest tests -v
+          python -m pip install --upgrade pip
+          pip install semgrep
+
+      - name: Run Semgrep without local data
+        env:
+          SEMGREP_SEND_METRICS: "off"
+          SEMGREP_ENABLE_VERSION_CHECK: "0"
+        run: |
+          semgrep scan --config semgrep.yml --validate
+          semgrep scan --config semgrep.yml --config p/typescript --config p/react --config p/owasp-top-ten --config p/secrets --error --sarif --output semgrep.sarif --exclude /data/** --exclude node_modules --exclude .next --exclude references .
+
+      - name: Upload Semgrep SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          if-no-files-found: error
+
+      - name: Upload Semgrep findings to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@c20e34f438d671fc35777cc9820dd7adf8252874
+        with:
+          sarif_file: semgrep.sarif
+
+  trufflehog:
+    name: TruffleHog secrets scan
+    needs: perimeter-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Scan tracked files and history
+        uses: trufflesecurity/trufflehog@e9d55b6b1e9f4b2df1e8391f12f0d69d6f8e41e6
+        with:
+          extra_args: --exclude-paths=.trufflehog-exclude
+
+  dependency-audit:
+    name: Dependency audit
+    needs: perimeter-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Audit production Node.js dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      - name: Audit Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit hatchling editables
+          pip install --no-build-isolation -e ./packages/domain -e ./packages/prediction -e ./packages/connectors -e ./packages/platform -e ./apps/api
+          pip-audit --strict

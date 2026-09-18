@@ -1,0 +1,4 @@
+#!/bin/sh
+# Установить в hooks/pre-receive bare-репозитория вместе с двумя .mjs-файлами.
+hook_dir="$(dirname "$0")/forpost-perimeter"
+exec node "$hook_dir/server-perimeter-guard.mjs"

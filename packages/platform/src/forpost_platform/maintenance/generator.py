@@ -137,7 +137,9 @@ class MaintenanceOrderStore:
         """Получить заявки по эксплуатационному району."""
         return [o for o in self._orders.values() if o.district == district]
 
-    def update_status(self, order_id: str, new_status: MaintenanceStatus) -> MaintenanceOrder | None:
+    def update_status(
+        self, order_id: str, new_status: MaintenanceStatus
+    ) -> MaintenanceOrder | None:
         """Обновить статус заявки."""
         order = self._orders.get(order_id)
         if order:

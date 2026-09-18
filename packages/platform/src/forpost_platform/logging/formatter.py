@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 class MaskingJsonFormatter(logging.Formatter):
@@ -9,15 +9,15 @@ class MaskingJsonFormatter(logging.Formatter):
 
     SENSITIVE_PATTERNS = [
         re.compile(
-            r"(password|token|secret|authorization|bearer)\s*[:=]\s*['\"]?([^'\"\s]+)",
+            r"(password|token|secret|authorization)\s*[:=]\s*['\"]?(?:Bearer\s+)?([^'\"\s]+)",
             re.IGNORECASE,
         ),
-        re.compile(r"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*", re.IGNORECASE),
+        re.compile(r"(Bearer)\s+[A-Za-z0-9\-\._~\+\/]+=*", re.IGNORECASE),
     ]
 
     def format(self, record: logging.LogRecord) -> str:
         log_obj = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": self._sanitize(record.getMessage()),

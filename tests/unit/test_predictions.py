@@ -1,6 +1,7 @@
+from datetime import UTC, datetime
+
 import pytest
 from forpost_domain.risks.entities import RiskCategory, RiskPrediction
-from forpost_prediction_core.mock_predictor import MockRiskPredictor
 
 
 @pytest.mark.parametrize(
@@ -12,10 +13,21 @@ from forpost_prediction_core.mock_predictor import MockRiskPredictor
         (RiskCategory.INFRASTRUCTURE_WEAR, "pump_station_main"),
     ],
 )
-def test_all_four_prediction_modules_contract(category: RiskCategory, target_id: str):
-    """Проверка единого контракта для всех 4 задач Москоллектора."""
-    predictor = MockRiskPredictor(category)
-    result = predictor.predict(target_id=target_id, context_data={})
+def test_prediction_contract_supports_all_four_declared_categories(
+    category: RiskCategory,
+    target_id: str,
+):
+    """Схема будущего прогноза поддерживает четыре заявленные категории без генератора-заглушки."""
+    result = RiskPrediction(
+        prediction_id=f"test-{category.value}",
+        target_id=target_id,
+        category=category,
+        probability=0.5,
+        horizon_hours=24,
+        calculated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        model_version="test-fixture",
+        explanation="Локальная тестовая запись для проверки доменного контракта.",
+    )
 
     assert isinstance(result, RiskPrediction)
     assert result.target_id == target_id

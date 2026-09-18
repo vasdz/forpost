@@ -1,0 +1,1 @@
+^(?:data|node_modules|\.next|references|\.venv|coverage|out|\.worktrees|\.superpowers|tmp)(?:[\\/]|$)

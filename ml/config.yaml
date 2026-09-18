@@ -1,0 +1,18 @@
+# Локальные параметры ML-контура; артефакты и результаты сохраняются вне Git.
+seed: 20260915
+feature_schema_version: "1"
+horizons_hours: [24, 48, 168]
+feature_windows_hours: [1, 24, 168, 720]
+minimum_positive_examples: 50
+validation_fraction: 0.2
+test_fraction: 0.2
+probability_thresholds:
+  sensor_failure: 0.7
+  fire_risk: 0.7
+  unauthorized_access: 0.7
+  infrastructure_wear: 0.7
+task_weights:
+  sensor_failure: 1.0
+  fire_risk: 1.0
+  unauthorized_access: 1.0
+  infrastructure_wear: 1.0

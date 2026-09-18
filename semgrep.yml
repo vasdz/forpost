@@ -1,0 +1,24 @@
+rules:
+  - id: javascript-no-eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Не используйте eval: он допускает выполнение непроверенного кода."
+    pattern: "eval(...)"
+    paths:
+      exclude:
+        - '**/node_modules/**'
+        - '**/.next/**'
+        - '**/references/**'
+        - '/data/**'
+
+  - id: javascript-no-dangerously-set-inner-html
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "Проверяйте и санитизируйте HTML перед dangerouslySetInnerHTML."
+    pattern: "<$ELEMENT dangerouslySetInnerHTML={$VALUE} ... />"
+    paths:
+      exclude:
+        - '**/node_modules/**'
+        - '**/.next/**'
+        - '**/references/**'
+        - '/data/**'

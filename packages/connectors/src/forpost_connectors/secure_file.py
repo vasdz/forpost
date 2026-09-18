@@ -4,7 +4,7 @@ import zipfile
 import pandas as pd
 
 
-class SecurityException(Exception):
+class SecurityError(Exception):
     pass
 
 
@@ -25,18 +25,18 @@ class SecureFileInspector:
                 for info in z.infolist():
                     # Блокировка макросов VBA
                     if "vbaProject.bin" in info.filename:
-                        raise SecurityException("Обнаружен запрещенный исполняемый макрос VBA")
+                        raise SecurityError("Обнаружен запрещенный исполняемый макрос VBA")
 
                     total_uncompressed_size += info.file_size
                     if total_uncompressed_size > cls.MAX_UNCOMPRESSED_SIZE:
-                        raise SecurityException(
+                        raise SecurityError(
                             "Подозрение на архивную бомбу: превышен лимит распаковки"
                         )
 
                 if len(z.infolist()) > cls.MAX_FILES_COUNT:
-                    raise SecurityException("Аномальное количество внутренних дескрипторов в файле")
-        except zipfile.BadZipFile:
-            raise SecurityException("Нарушена структура формата данных")
+                    raise SecurityError("Аномальное количество внутренних дескрипторов в файле")
+        except zipfile.BadZipFile as error:
+            raise SecurityError("Нарушена структура формата данных") from error
 
     @classmethod
     def sanitize_dataframe(cls, df: pd.DataFrame) -> pd.DataFrame:
