@@ -7,28 +7,41 @@ const unavailableMessage = 'Локальный снимок данных нед�
 
 export type LocalSituationLoadState =
   | { status: 'loading' }
-  | { status: 'ready'; snapshot: LocalSituationSnapshot }
+  | {
+    status: 'ready';
+    snapshot: LocalSituationSnapshot;
+    refreshedAt: string;
+    isRefreshing: boolean;
+    refreshError: string | null;
+  }
   | { status: 'unavailable'; message: string };
 
-type LocalSituationLoadResult = Exclude<LocalSituationLoadState, { status: 'loading' }>;
+export type LocalSituationFetchResult =
+  | { status: 'ready'; snapshot: LocalSituationSnapshot }
+  | { status: 'unavailable'; message: string };
 
 export type LocalSituationFetcher = (
   input: string,
   init: RequestInit,
 ) => Promise<Response>;
 
-function unavailable(): LocalSituationLoadResult {
+function unavailable(): LocalSituationFetchResult {
   return { status: 'unavailable', message: unavailableMessage };
 }
 
 export async function fetchLocalSituation(
   fetcher: LocalSituationFetcher = globalThis.fetch,
-): Promise<Exclude<LocalSituationLoadState, { status: 'loading' }>> {
+  signal?: AbortSignal,
+): Promise<LocalSituationFetchResult> {
   try {
-    const response = await fetcher('/api/local-situation', {
+    const init: RequestInit = {
       cache: 'no-store',
       headers: { Accept: 'application/json' },
-    });
+    };
+    if (signal !== undefined) {
+      init.signal = signal;
+    }
+    const response = await fetcher('/api/local-situation', init);
     if (!response.ok) {
       return unavailable();
     }

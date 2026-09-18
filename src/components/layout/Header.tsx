@@ -7,6 +7,23 @@ import { Button } from '@/components/ui/Button';
 import { useLocalSituation } from '@/data/LocalSituationProvider';
 import { useThemeStore } from '@/stores/themeStore';
 
+export function getSourceLabel(
+  status: 'loading' | 'ready' | 'unavailable',
+  freshness: 'fresh' | 'stale' | 'historical' | null,
+  isRefreshing: boolean,
+  refreshError: string | null,
+): string {
+  if (status === 'loading') return 'Локальный снимок загружается';
+  if (status === 'unavailable') return 'Локальный снимок недоступен';
+  if (isRefreshing) return 'Обновление снимка';
+  const base = freshness === 'historical'
+    ? 'Исторический источник'
+    : freshness === 'stale'
+      ? 'Источник устарел'
+      : 'Источник актуален';
+  return refreshError === null ? base : `${base} · обновление недоступно`;
+}
+
 export function getPageName(pathname: string): string {
   switch (pathname) {
     case '/': return 'Обзор';
@@ -26,11 +43,12 @@ export function Header() {
   const pathname = usePathname();
   const { theme, toggleTheme } = useThemeStore();
   const localSituation = useLocalSituation();
-  const sourceLabel = localSituation.status === 'ready'
-    ? 'Локальный снимок доступен'
-    : localSituation.status === 'loading'
-      ? 'Локальный снимок загружается'
-      : 'Локальный снимок недоступен';
+  const sourceLabel = getSourceLabel(
+    localSituation.status,
+    localSituation.status === 'ready' ? localSituation.snapshot.dataQuality.freshness : null,
+    localSituation.status === 'ready' && localSituation.isRefreshing,
+    localSituation.status === 'ready' ? localSituation.refreshError : null,
+  );
 
   return <header className="surface-subtle fixed left-[var(--active-sidebar-width)] right-0 top-0 z-30 flex h-[var(--header-height)] items-center justify-between rounded-none border-x-0 border-t-0 px-4 md:px-6">
     <nav aria-label="Навигационная цепочка" className="flex items-center gap-2 text-[13px]"><span className="font-heading font-semibold tracking-[0.02em]">ФОРПОСТ</span><ChevronRight size={14} aria-hidden="true" className="text-[var(--color-text-dim)]" /><span className="text-[var(--color-text-muted)]">{getPageName(pathname)}</span></nav>
