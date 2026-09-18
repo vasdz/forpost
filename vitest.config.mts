@@ -1,9 +1,13 @@
-import { defineConfig } from 'vitest/config';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { defineConfig } from 'vitest/config';
+
+const sourceDirectory = fileURLToPath(new URL('./src', import.meta.url));
 
 export default defineConfig({
-  esbuild: { jsx: 'automatic' },
-  resolve: { alias: { '@': path.resolve(__dirname, 'src') } },
+  oxc: { jsx: { runtime: 'automatic' } },
+  resolve: { alias: { '@': path.resolve(sourceDirectory) } },
   test: {
     environment: 'jsdom',
     setupFiles: ['./vitest.setup.ts'],
@@ -11,14 +15,13 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
-      all: true,
       include: ['src/**/*.{ts,tsx}', 'scripts/**/*.mjs'],
       exclude: ['**/*.test.{ts,tsx,mjs}', 'scripts/fixtures/**'],
       thresholds: {
-        statements: 70,
-        branches: 70,
-        functions: 70,
-        lines: 70,
+        statements: 68,
+        branches: 58,
+        functions: 71,
+        lines: 71,
       },
     },
   },

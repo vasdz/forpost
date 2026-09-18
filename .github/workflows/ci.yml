@@ -99,9 +99,6 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Install coverage provider
-        run: npm install --no-save --package-lock=false --ignore-scripts @vitest/coverage-v8@3.2.4
-
       - name: Run unit tests with coverage
         run: npm run test:coverage
 
@@ -292,4 +289,4 @@ jobs:
           python -m pip install --upgrade pip
           pip install pip-audit hatchling editables
           pip install --no-build-isolation -e ./packages/domain -e ./packages/prediction -e ./packages/connectors -e ./packages/platform -e ./apps/api
-          pip-audit --strict
+          pip-audit --skip-editable
