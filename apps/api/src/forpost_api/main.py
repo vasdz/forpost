@@ -9,6 +9,7 @@ from forpost_api.routes.availability import router as availability_router
 from forpost_api.routes.predictions import router as predictions_router
 from forpost_api.routes.v1.analytics import router as analytics_router
 from forpost_api.routes.v1.demo_session import router as demo_session_router
+from forpost_api.routes.v1.incidents import router as incidents_router
 from forpost_api.routes.v1.maintenance import router as maintenance_router
 from forpost_api.routes.v1.risks import router as risks_router
 
@@ -35,6 +36,7 @@ app.include_router(risks_router, prefix="/api/v1")
 app.include_router(maintenance_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(demo_session_router, prefix="/api/v1")
+app.include_router(incidents_router, prefix="/api/v1")
 
 
 @app.get("/health", status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
