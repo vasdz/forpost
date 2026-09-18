@@ -24,5 +24,5 @@ function getSizeClass(size: unknown): string {
 }
 
 export function Button({ className, variant = 'primary', size = 'md', type = 'button', ...props }: ButtonProps) {
-  return <button type={type} className={cn('control-surface inline-flex items-center justify-center gap-2 rounded-[8px] border font-medium transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-50', getVariantClass(variant), getSizeClass(size), className)} {...props} />;
+  return <button type={type} className={cn('control-surface inline-flex items-center justify-center gap-2 rounded-[4px] border font-medium transition-colors duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-50', getVariantClass(variant), getSizeClass(size), className)} {...props} />;
 }

@@ -535,6 +535,38 @@ def test_config_rejects_interim_root_outside_the_local_data_layout(tmp_path: Pat
         )
 
 
+def test_config_rejects_unbounded_chunk_size(tmp_path: Path) -> None:
+    """Слишком большая порция не должна разрешать исчерпание памяти одним CSV."""
+
+    project_root = tmp_path / "project"
+    with pytest.raises(EdaError, match="Размер порции превышает"):
+        EdaConfig(
+            allowed_raw_root=project_root / "data" / "raw",
+            allowed_interim_root=project_root / "data" / "interim",
+            allowed_docs_root=project_root / "docs",
+            chunk_size=1_000_001,
+        )
+
+
+def test_discovery_stops_when_file_budget_is_exceeded(tmp_path: Path) -> None:
+    """Рекурсивный поиск ограничивает число кандидатов до чтения их содержимого."""
+
+    raw_root, config = build_fixture(tmp_path)
+    (raw_root / "extra.csv").write_text("unknown\n", encoding="utf-8")
+
+    with pytest.raises(EdaError, match="лимит CSV"):
+        analyze_dataset(raw_root, replace(config, max_csv_files=3))
+
+
+def test_registry_stops_when_row_budget_is_exceeded(tmp_path: Path) -> None:
+    """Реестр не накапливается в памяти сверх заданного бюджета."""
+
+    raw_root, config = build_fixture(tmp_path)
+
+    with pytest.raises(EdaError, match="лимит строк справочника"):
+        analyze_dataset(raw_root, replace(config, max_registry_rows=1))
+
+
 def test_output_write_error_is_exposed_as_domain_diagnostic(tmp_path: Path, monkeypatch) -> None:
     """Ловит необработанный traceback при ошибке записи локальных производных файлов."""
     raw_root, config = build_fixture(tmp_path)

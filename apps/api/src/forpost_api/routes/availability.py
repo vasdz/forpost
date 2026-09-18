@@ -12,7 +12,9 @@ from forpost_api.routes.predictions import load_exported_predictions
 
 router = APIRouter(tags=["Availability"])
 Subject = Annotated[SecuritySubject, Depends(require_permission(Permission.VIEW_RISKS))]
-LOCAL_SNAPSHOT_PATH = Path(__file__).resolve().parents[5] / "data" / "processed" / "local-situation.json"
+LOCAL_SNAPSHOT_PATH = (
+    Path(__file__).resolve().parents[5] / "data" / "processed" / "local-situation.json"
+)
 SourceState = Literal["available", "unavailable"]
 
 

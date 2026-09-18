@@ -15,6 +15,7 @@ from forpost_api.main import app
 from forpost_api.middleware.payload_guard import MAX_PAYLOAD_SIZE, PayloadSizeLimitMiddleware
 from forpost_api.middleware.rate_limit import limiter
 from forpost_platform.security.identity import Permission, Role, SecuritySubject
+from slowapi.middleware import SlowAPIMiddleware
 
 IDENTITY_UNAVAILABLE = {
     "detail": {
@@ -141,6 +142,23 @@ def test_wrong_local_service_token_is_rejected(monkeypatch) -> None:
     assert response.json() == UNAUTHENTICATED
 
 
+def test_local_service_token_cannot_record_dispatcher_decision(monkeypatch) -> None:
+    """Сервисный BFF-токен не должен подменять личность человека в журнале решений."""
+
+    token = "x" * 40
+    monkeypatch.setenv("FORPOST_API_SERVICE_TOKEN", token)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/predictions/prediction-001/decisions",
+            headers={"authorization": f"Bearer {token}"},
+            json={"decision": "confirmed", "reason": "Проверка назначена."},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == IDENTITY_UNAVAILABLE
+
+
 def test_root_health_reports_not_ready_instead_of_a_healthy_protected_service() -> None:
     """Ответ 200/ok скроет неготовность контура от оркестратора и оператора."""
 
@@ -197,6 +215,16 @@ def test_registered_rate_limiter_returns_project_handler_after_global_quota() ->
         "error": "Слишком много запросов",
         "detail": "Превышен допустимый лимит обращений к узлу мониторинга КИИ.",
     }
+
+
+def test_rate_limiter_runs_before_payload_body_is_buffered() -> None:
+    """Исчерпанный лимит должен остановить запрос до чтения потенциально большого тела."""
+
+    middleware_order = [middleware.cls for middleware in app.user_middleware]
+
+    assert middleware_order.index(SlowAPIMiddleware) < middleware_order.index(
+        PayloadSizeLimitMiddleware
+    )
 
 
 def test_permission_dependency_blocks_dispatcher_from_future_approval_path() -> None:

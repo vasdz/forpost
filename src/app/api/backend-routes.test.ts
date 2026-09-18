@@ -27,24 +27,22 @@ describe('same-origin backend routes', () => {
     expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(2, '/api/availability');
   });
 
-  it('передаёт решение как JSON, безопасно кодируя ID прогноза', async () => {
+  it('не принимает решение без доверенной пользовательской сессии', async () => {
     const request = new Request('http://127.0.0.1/api/predictions/id/decisions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ decision: 'confirmed', reason: 'Проверка назначена.' }),
     });
 
-    await postDecision(request, {
+    const response = await postDecision(request, {
       params: Promise.resolve({ predictionId: 'prediction/001' }),
     });
 
-    expect(backend.proxyForpostApi).toHaveBeenCalledWith(
-      '/api/predictions/prediction%2F001/decisions',
-      {
-        method: 'POST',
-        body: JSON.stringify({ decision: 'confirmed', reason: 'Проверка назначена.' }),
-      },
-    );
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: 'Доверенная пользовательская сессия не подключена',
+    });
+    expect(backend.proxyForpostApi).not.toHaveBeenCalled();
   });
 
   it('отклоняет не-JSON решение до обращения к FastAPI', async () => {

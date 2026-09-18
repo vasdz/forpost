@@ -12,7 +12,7 @@ from forpost_platform.audit.ledger import AuditSeverity, audit_ledger
 from forpost_platform.security.identity import Permission, SecuritySubject
 from pydantic import ValidationError
 
-from forpost_api.dependencies import require_permission
+from forpost_api.dependencies import get_current_human_subject, require_permission
 from forpost_api.schemas.predictions import (
     Prediction,
     PredictionDecisionRequest,
@@ -23,6 +23,7 @@ from forpost_api.schemas.predictions import (
 router = APIRouter(tags=["Predictions"])
 
 Subject = Annotated[SecuritySubject, Depends(require_permission(Permission.VIEW_RISKS))]
+DecisionSubject = Annotated[SecuritySubject, Depends(get_current_human_subject)]
 PENDING_MODEL_RESPONSE = {"error": "ML модель не обучена", "status": "pending"}
 ML_MODELS_DIRECTORY = Path(__file__).resolve().parents[6] / "ml" / "models"
 MODEL_VERSION_PATTERN = re.compile(r"v[1-9]\d*")
@@ -100,7 +101,7 @@ async def get_predictions(subject: Subject) -> JSONResponse:
 )
 async def record_prediction_decision(
     request: PredictionDecisionRequest,
-    subject: Subject,
+    subject: DecisionSubject,
     prediction_id: Annotated[str, ApiPath(min_length=1, max_length=128)],
 ) -> PredictionDecisionResponse:
     """Связывает решение диспетчера только с текущим валидным прогнозом."""

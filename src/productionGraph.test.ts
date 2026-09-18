@@ -35,4 +35,15 @@ describe('граф production-кода', () => {
     expect(existsSync('src/mocks')).toBe(false);
     expect(violations).toEqual([]);
   });
+
+  it('соблюдает плоский интерфейс SPEC без стекла и blur', () => {
+    const files = productionRoots.flatMap(productionFiles)
+      .map((path) => ({ path, content: readFileSync(path, 'utf8') }));
+    const forbiddenStyles = ['glass-surface', 'backdrop-blur', 'backdrop-filter'];
+    const violations = files.flatMap(({ path, content }) => forbiddenStyles
+      .filter((style) => content.includes(style))
+      .map((style) => `${path}: ${style}`));
+
+    expect(violations).toEqual([]);
+  });
 });

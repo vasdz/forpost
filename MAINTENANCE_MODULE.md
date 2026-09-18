@@ -17,28 +17,32 @@
 ```python
 class MaintenancePriority(StrEnum):
     """Приоритет заявки по срочности"""
+
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
 
+
 class MaintenanceStatus(StrEnum):
     """Жизненный цикл заявки"""
-    DRAFT = "draft"                    # Черновик (auto-generated)
+
+    DRAFT = "draft"  # Черновик (auto-generated)
     PENDING_APPROVAL = "pending_approval"  # На утверждении
-    APPROVED = "approved"              # Утверждена
-    COMPLETED = "completed"            # Выполнена
+    APPROVED = "approved"  # Утверждена
+    COMPLETED = "completed"  # Выполнена
+
 
 class MaintenanceOrder(BaseModel):
-    order_id: str                       # MO-XXXXXXXX (UUID-based)
-    target_id: str                      # Asset ID (датчик, участок, техника)
-    district: str                       # rek-1..rek-4
-    risk_category: str                  # sensor_failure, fire_risk, etc.
-    priority: MaintenancePriority       # Auto-determined from probability
-    status: MaintenanceStatus           # Lifecycle
-    recommended_action: str             # Текстовое описание действия
-    normative_ref: str                  # ГОСТ/СНиП ссылка
-    deadline_hours: int                 # Время до критического отказа
+    order_id: str  # MO-XXXXXXXX (UUID-based)
+    target_id: str  # Asset ID (датчик, участок, техника)
+    district: str  # rek-1..rek-4
+    risk_category: str  # sensor_failure, fire_risk, etc.
+    priority: MaintenancePriority  # Auto-determined from probability
+    status: MaintenanceStatus  # Lifecycle
+    recommended_action: str  # Текстовое описание действия
+    normative_ref: str  # ГОСТ/СНиП ссылка
+    deadline_hours: int  # Время до критического отказа
     created_at: datetime
     generated_by_model_version: str
 ```
@@ -60,7 +64,7 @@ class MaintenanceRegulator:
                 "high": "Немедленная замена",
                 "critical": "АВАРИЙНАЯ ОСТАНОВКА",
             },
-            "horizon_multipliers": {...}
+            "horizon_multipliers": {...},
         },
         # ... fire_risk, unauthorized_access, infrastructure_wear ...
     }

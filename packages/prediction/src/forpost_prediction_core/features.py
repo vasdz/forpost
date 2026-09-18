@@ -54,9 +54,9 @@ def build_channel_features(
             left_on="channel_id",
             right_index=True,
         )
-    result[[f"event_count_{window}h" for window in windows]] = result[
-        [f"event_count_{window}h" for window in windows]
-    ].fillna(0).astype("int64")
+    result[[f"event_count_{window}h" for window in windows]] = (
+        result[[f"event_count_{window}h" for window in windows]].fillna(0).astype("int64")
+    )
 
     latest = history.groupby("channel_id", sort=False)["observed_at"].max()
     result = result.merge(

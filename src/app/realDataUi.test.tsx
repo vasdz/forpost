@@ -76,20 +76,32 @@ describe('интерфейс локального снимка', () => {
     expect(screen.queryByRole('columnheader', { name: 'Вероятность' })).not.toBeInTheDocument();
   });
 
-  it('оставляет в реестрах только доступные каналы и объекты', () => {
+  it('даёт поиск, экспорт и детали только для доступных реестров', () => {
     render(<RegistriesPage />);
 
     expect(screen.getByRole('heading', { name: 'Реестры наблюдаемого снимка' })).toBeInTheDocument();
-    expect(screen.getByRole('table', { name: 'Каналы СМВУ' })).toHaveTextContent('channel-1');
+    expect(screen.getByRole('tab', { name: 'Оборудование' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Датчики' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Журналы ОДС' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'АРМ-Контроль' })).toBeInTheDocument();
+    expect(screen.getByRole('searchbox', { name: 'Поиск по реестру оборудования' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Экспортировать оборудование в CSV' })).toBeInTheDocument();
     expect(screen.getByRole('table', { name: 'Объекты' })).toHaveTextContent('object-1');
-    expect(screen.queryByRole('tab', { name: /АРМ-Контроль/i })).not.toBeInTheDocument();
+  });
+
+  it('показывает современный журнал технологических событий из локального снимка', () => {
+    render(<JournalsPage />);
+
+    expect(screen.getByRole('heading', { name: 'Журнал технологических событий' })).toBeInTheDocument();
+    expect(screen.getByRole('searchbox', { name: 'Поиск по журналу событий' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Экспортировать журнал в CSV' })).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Журнал технологических событий' })).toHaveTextContent('event-1');
   });
 
   it.each([
     ['Пожарный риск недоступен', FireRiskPage],
     ['Несанкционированный доступ недоступен', UnauthorizedAccessPage],
     ['Износ инфраструктуры недоступен', InfrastructureWearPage],
-    ['Журнал решений недоступен', JournalsPage],
     ['Заявки недоступны', ApplicationsPage],
     ['Настройки недоступны', DesignSystemPage],
   ])('не формирует вымышленные результаты: %s', (heading, Page) => {

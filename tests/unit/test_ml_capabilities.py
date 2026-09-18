@@ -7,9 +7,7 @@ from forpost_prediction_core.capabilities import (
 
 def test_event_only_sources_enable_only_sensor_failure_proxy() -> None:
     """Ловит попытку обучать пожар, доступ или износ без обязательных источников."""
-    available_sources = frozenset(
-        {SourceKind.EVENTS, SourceKind.CHANNELS, SourceKind.OBJECTS}
-    )
+    available_sources = frozenset({SourceKind.EVENTS, SourceKind.CHANNELS, SourceKind.OBJECTS})
 
     sensor_failure = assess_task_capability(PredictionTask.SENSOR_FAILURE, available_sources)
     fire_risk = assess_task_capability(PredictionTask.FIRE_RISK, available_sources)

@@ -2,7 +2,7 @@
 
 import pytest
 from fastapi.testclient import TestClient
-from forpost_api.dependencies import get_current_subject
+from forpost_api.dependencies import get_current_human_subject, get_current_subject
 from forpost_api.main import app
 from forpost_api.routes import predictions
 from forpost_platform.audit.ledger import audit_ledger
@@ -25,7 +25,7 @@ def prediction_json(prediction_id: str, model_version: str = "v1") -> str:
         '"recommended_action": "Проверить датчик", '
         '"priority": "high", '
         '"status": "new"'
-        '}]} '
+        "}]} "
     )
 
 
@@ -33,12 +33,14 @@ def prediction_json(prediction_id: str, model_version: str = "v1") -> str:
 def client():
     """Подключает доверенного диспетчера без внешнего поставщика идентификации."""
 
-    app.dependency_overrides[get_current_subject] = lambda: SecuritySubject(
+    subject = SecuritySubject(
         user_id="test-dispatcher",
         username="test-dispatcher",
         role=Role.DISPATCHER,
         allowed_districts=["rek-1"],
     )
+    app.dependency_overrides[get_current_subject] = lambda: subject
+    app.dependency_overrides[get_current_human_subject] = lambda: subject
     try:
         with TestClient(app) as test_client:
             yield test_client

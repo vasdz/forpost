@@ -32,9 +32,11 @@ def evaluate_binary_probabilities(
         raise ValueError("Метки и вероятности должны быть одномерными массивами одной длины")
     if not 0 < threshold < 1 or not np.isfinite(threshold):
         raise ValueError("Порог вероятности должен находиться строго между 0 и 1")
-    if not np.isin(truth, (0, 1)).all() or not np.isfinite(scores).all() or not (
-        (scores >= 0) & (scores <= 1)
-    ).all():
+    if (
+        not np.isin(truth, (0, 1)).all()
+        or not np.isfinite(scores).all()
+        or not ((scores >= 0) & (scores <= 1)).all()
+    ):
         raise ValueError("Оценка требует бинарных меток и конечных вероятностей от 0 до 1")
     positives = int(truth.sum())
     negatives = len(truth) - positives
@@ -45,7 +47,9 @@ def evaluate_binary_probabilities(
     true_positive = int(np.count_nonzero(predicted & (truth == 1)))
     false_positive = int(np.count_nonzero(predicted & (truth == 0)))
     false_negative = int(np.count_nonzero(~predicted & (truth == 1)))
-    precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else 0.0
+    precision = (
+        true_positive / (true_positive + false_positive) if true_positive + false_positive else 0.0
+    )
     recall = true_positive / (true_positive + false_negative)
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return BinaryMetrics(

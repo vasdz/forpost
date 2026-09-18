@@ -1,7 +1,7 @@
 import { open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import {
-  isLocalSituationSnapshot,
+  normalizeStoredLocalSituationSnapshot,
   type LocalSituationSnapshot,
 } from './localSituationContract';
 
@@ -78,10 +78,11 @@ async function readSnapshotFile(): Promise<string> {
 export async function getLocalSituationSnapshot(): Promise<LocalSituationSnapshot> {
   try {
     const parsed: unknown = JSON.parse(await readSnapshotFile());
-    if (!isLocalSituationSnapshot(parsed)) {
+    const snapshot = normalizeStoredLocalSituationSnapshot(parsed);
+    if (snapshot === null) {
       throw new LocalSituationUnavailableError();
     }
-    return parsed;
+    return snapshot;
   } catch (error) {
     if (error instanceof LocalSituationUnavailableError) {
       throw error;

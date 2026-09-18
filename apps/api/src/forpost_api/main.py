@@ -22,9 +22,10 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
-# Порядок регистрации обратный порядку выполнения: security-заголовки покрывают и отказы guard-а.
-app.add_middleware(SlowAPIMiddleware)
+# Порядок регистрации обратный порядку выполнения: security-заголовки покрывают
+# все ответы, rate limit отклоняет запрос до буферизации ограниченного тела.
 app.add_middleware(PayloadSizeLimitMiddleware)
+app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(predictions_router)

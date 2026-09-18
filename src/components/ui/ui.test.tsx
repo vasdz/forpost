@@ -42,7 +42,7 @@ describe('Badge и Button', () => {
     );
   });
 
-  it('формируют стеклянную рабочую поверхность с семантическим статусом', () => {
+  it('формируют плоскую рабочую поверхность с семантическим статусом', () => {
     render(
       <Card aria-label="Контекст наблюдения">
         <Badge tone="critical">Критично</Badge>
@@ -50,7 +50,7 @@ describe('Badge и Button', () => {
       </Card>,
     );
 
-    expect(screen.getByLabelText('Контекст наблюдения')).toHaveClass('glass-surface');
+    expect(screen.getByLabelText('Контекст наблюдения')).toHaveClass('surface');
     expect(screen.getByText('Критично')).toHaveClass('status-critical');
     expect(screen.getByRole('button', { name: 'Открыть' })).toHaveClass('control-surface');
   });

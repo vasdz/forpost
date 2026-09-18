@@ -22,6 +22,4 @@ def test_binary_evaluation_reports_calibrated_threshold_metrics() -> None:
 def test_binary_evaluation_refuses_one_class_holdout() -> None:
     """Ловит публикацию псевдометрики, когда во временном holdout нет второго класса."""
     with pytest.raises(EvaluationUnavailableError, match="обоих классов"):
-        evaluate_binary_probabilities(
-            np.array([0, 0]), np.array([0.1, 0.2]), threshold=0.7
-        )
+        evaluate_binary_probabilities(np.array([0, 0]), np.array([0.1, 0.2]), threshold=0.7)

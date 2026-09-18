@@ -128,11 +128,17 @@ describe.sequential('локальный снимок ситуации', () => {
     });
   });
 
-  it('не выдаёт снимок с лишним служебным полем', async () => {
+  it('принимает известный legacy-конверт, но не выдаёт служебные метаданные', async () => {
     await writeSnapshot({
       ...validSnapshot,
       sourceMetadata: {
         journalFileCount: 1,
+        selectedJournalFileCount: 1,
+        scannedEventCount: 12,
+        skippedEventCount: 0,
+        channelCount: 1,
+        objectCount: 1,
+        latestObservedAt: '2026-08-01T23:59:58',
       },
     });
 
@@ -140,11 +146,21 @@ describe.sequential('локальный снимок ситуации', () => {
       new Request('http://service.invalid/api/local-situation', { headers: { host: 'localhost:3000' } }),
     );
 
-    expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toEqual({
-      code: 'LOCAL_SITUATION_UNAVAILABLE',
-      message: 'Локальный снимок данных недоступен.',
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(publicSnapshot);
+  });
+
+  it('отклоняет legacy-конверт с неполной схемой метаданных', async () => {
+    await writeSnapshot({
+      ...validSnapshot,
+      sourceMetadata: {
+        journalFileCount: 1,
+      },
     });
+
+    await expect(getLocalSituationSnapshot()).rejects.toBeInstanceOf(
+      LocalSituationUnavailableError,
+    );
   });
 
   it('не выдаёт снимок с числом наблюдений выше документированного предела', async () => {

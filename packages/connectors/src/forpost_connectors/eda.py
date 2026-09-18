@@ -59,6 +59,11 @@ MONTH_LABELS: Final[tuple[str, ...]] = (
     "Дек",
 )
 DEFAULT_MAX_BITMAP_BYTES: Final[int] = 2 * 1024 * 1024 * 1024
+MAX_CHUNK_SIZE: Final[int] = 1_000_000
+DEFAULT_MAX_CSV_FILES: Final[int] = 512
+DEFAULT_MAX_DISCOVERY_ENTRIES: Final[int] = 50_000
+DEFAULT_MAX_INPUT_BYTES: Final[int] = 256 * 1024 * 1024 * 1024
+DEFAULT_MAX_REGISTRY_ROWS: Final[int] = 2_000_000
 EXTERNAL_DUPLICATE_MIN_BUCKET_COUNT: Final[int] = 64
 EXTERNAL_DUPLICATE_BUCKET_MAX_BYTES: Final[int] = 256 * 1024 * 1024
 EXTERNAL_DUPLICATE_DISK_RESERVE_BYTES: Final[int] = 256 * 1024 * 1024
@@ -77,6 +82,10 @@ class EdaConfig:
     silent_days: int = 30
     outlier_z: float = 5.0
     max_bitmap_bytes: int = DEFAULT_MAX_BITMAP_BYTES
+    max_csv_files: int = DEFAULT_MAX_CSV_FILES
+    max_discovery_entries: int = DEFAULT_MAX_DISCOVERY_ENTRIES
+    max_input_bytes: int = DEFAULT_MAX_INPUT_BYTES
+    max_registry_rows: int = DEFAULT_MAX_REGISTRY_ROWS
 
     def __post_init__(self) -> None:
         try:
@@ -88,12 +97,22 @@ class EdaConfig:
             raise EdaError("Корень промежуточных результатов должен быть data/interim")
         if self.chunk_size < 1:
             raise EdaError("Размер порции должен быть положительным")
+        if self.chunk_size > MAX_CHUNK_SIZE:
+            raise EdaError("Размер порции превышает безопасный лимит")
         if self.silent_days < 1:
             raise EdaError("Порог тишины должен быть положительным")
         if not math.isfinite(self.outlier_z) or self.outlier_z <= 0:
             raise EdaError("Порог z-score должен быть положительным конечным числом")
         if self.max_bitmap_bytes < 1:
             raise EdaError("Лимит битовой карты должен быть положительным")
+        if self.max_csv_files < 3:
+            raise EdaError("Лимит CSV должен учитывать журналы и два справочника")
+        if self.max_discovery_entries < self.max_csv_files:
+            raise EdaError("Лимит обхода должен быть не меньше лимита CSV")
+        if self.max_input_bytes < 1:
+            raise EdaError("Лимит входных данных должен быть положительным")
+        if self.max_registry_rows < 1:
+            raise EdaError("Лимит строк справочника должен быть положительным")
 
 
 @dataclass(frozen=True)
@@ -234,8 +253,10 @@ def analyze_dataset(
     settings = config or EdaConfig()
     checked_root = _guard_directory(raw_root, settings.allowed_raw_root, "Источник")
     journals, channels_path, objects_path = _discover_sources(checked_root, settings)
-    channels = _read_registry(channels_path, CHANNEL_HEADERS, "ид_канала_данных")
-    objects = _read_registry(objects_path, OBJECT_HEADERS, "ид_объект")
+    channels = _read_registry(
+        channels_path, CHANNEL_HEADERS, "ид_канала_данных", settings.max_registry_rows
+    )
+    objects = _read_registry(objects_path, OBJECT_HEADERS, "ид_объект", settings.max_registry_rows)
     channel_ids = tuple(row["ид_канала_данных"] for row in channels)
     sensor_types = tuple(row["тип_датчика"] for row in channels)
     accumulator = _Accumulator(
@@ -268,7 +289,30 @@ def analyze_dataset(
 def _discover_sources(raw_root: Path, config: EdaConfig) -> tuple[tuple[Path, ...], Path, Path]:
     journals: list[Path] = []
     registries: dict[str, Path] = {}
-    for path in raw_root.rglob("*.csv"):
+    csv_paths: list[Path] = []
+    discovered_entries = 0
+    input_bytes = 0
+    try:
+        for current_root, directory_names, file_names in os.walk(raw_root, followlinks=False):
+            directory_names.sort()
+            file_names.sort()
+            discovered_entries += len(directory_names) + len(file_names)
+            if discovered_entries > config.max_discovery_entries:
+                raise EdaError("Превышен лимит элементов рекурсивного обхода")
+            for file_name in file_names:
+                if not file_name.casefold().endswith(".csv"):
+                    continue
+                path = Path(current_root) / file_name
+                csv_paths.append(path)
+                if len(csv_paths) > config.max_csv_files:
+                    raise EdaError("Превышен лимит CSV-файлов")
+                input_bytes += path.stat().st_size
+                if input_bytes > config.max_input_bytes:
+                    raise EdaError("Превышен лимит объёма входных CSV")
+    except OSError as error:
+        raise EdaError("Не удалось безопасно обойти источник EDA") from error
+
+    for path in csv_paths:
         checked = _guard_file(path, config.allowed_raw_root, "CSV-файл")
         role = _detect_role(checked)
         if role == "journal":
@@ -301,7 +345,9 @@ def _detect_role(path: Path) -> str:
     raise EdaError("CSV содержит неизвестную схему")
 
 
-def _read_registry(path: Path, headers: frozenset[str], key: str) -> list[dict[str, str]]:
+def _read_registry(
+    path: Path, headers: frozenset[str], key: str, max_rows: int
+) -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
     identifiers: set[str] = set()
     try:
@@ -310,6 +356,8 @@ def _read_registry(path: Path, headers: frozenset[str], key: str) -> list[dict[s
             if frozenset(reader.fieldnames or ()) != headers:
                 raise EdaError("Справочник не соответствует ожидаемой схеме")
             for row in reader:
+                if len(records) >= max_rows:
+                    raise EdaError("Превышен лимит строк справочника")
                 if None in row or any(value is None or value == "" for value in row.values()):
                     raise EdaError("Справочник содержит пустое или лишнее поле")
                 identifier = row[key]

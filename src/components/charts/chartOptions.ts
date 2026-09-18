@@ -9,6 +9,36 @@ const tooltip = { backgroundColor: 'var(--color-panel)', borderColor: splitLine,
 
 export type TimelinePoint = { at: string; value: number; lower?: number; upper?: number };
 
+export function buildObservedActivityOption(
+  buckets: Array<{ at: string; events: number; alarms: number }>,
+): EChartsOption {
+  return {
+    grid: { top: 36, right: 16, bottom: 42, left: 44 },
+    tooltip: { ...tooltip, trigger: 'axis' },
+    legend: { top: 0, textStyle: { color: axisText } },
+    xAxis: {
+      type: 'category',
+      data: buckets.map((bucket) => bucket.at),
+      axisLabel: {
+        color: axisText,
+        fontFamily: 'var(--font-jetbrains-mono)',
+        formatter: (value: string) => value.slice(5, 16).replace('T', ' '),
+      },
+      axisLine: { lineStyle: { color: splitLine } },
+    },
+    yAxis: {
+      type: 'value',
+      minInterval: 1,
+      axisLabel: { color: axisText, fontFamily: 'var(--font-jetbrains-mono)' },
+      splitLine: { lineStyle: { color: splitLine } },
+    },
+    series: [
+      { name: 'Все события', type: 'bar', data: buckets.map((bucket) => bucket.events), itemStyle: { color: dataColor } },
+      { name: 'Со сработкой', type: 'bar', data: buckets.map((bucket) => bucket.alarms), itemStyle: { color: dangerColor } },
+    ],
+  };
+}
+
 export function buildTimeSeriesOption({ history, forecast, now, unit }: { history: TimelinePoint[]; forecast: TimelinePoint[]; now: string; unit: string }): EChartsOption {
   const allDates = [...new Set([...history, ...forecast].map((point) => point.at).concat(now))].sort();
   const historicalValues = new Map(history.map((point) => [point.at, point]));

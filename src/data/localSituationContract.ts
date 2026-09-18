@@ -41,6 +41,23 @@ export type LocalSituationSnapshot = {
   events: LocalSituationEvent[];
 };
 
+const SNAPSHOT_KEYS = [
+  'sourceAvailability',
+  'channels',
+  'objects',
+  'events',
+] as const;
+
+const LEGACY_SOURCE_METADATA_KEYS = [
+  'journalFileCount',
+  'selectedJournalFileCount',
+  'scannedEventCount',
+  'skippedEventCount',
+  'channelCount',
+  'objectCount',
+  'latestObservedAt',
+] as const;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -57,6 +74,10 @@ function isString(value: unknown): value is string {
 
 function isBoolean(value: unknown): value is boolean {
   return typeof value === 'boolean';
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 0;
 }
 
 export function isObservedTimestamp(value: unknown): value is string {
@@ -142,12 +163,7 @@ function isEvent(value: unknown): value is LocalSituationEvent {
 }
 
 export function isLocalSituationSnapshot(value: unknown): value is LocalSituationSnapshot {
-  if (!isRecord(value) || !hasExactKeys(value, [
-    'sourceAvailability',
-    'channels',
-    'objects',
-    'events',
-  ])) {
+  if (!isRecord(value) || !hasExactKeys(value, SNAPSHOT_KEYS)) {
     return false;
   }
 
@@ -159,4 +175,45 @@ export function isLocalSituationSnapshot(value: unknown): value is LocalSituatio
     && Array.isArray(value.events)
     && value.events.length <= MAX_OBSERVED_EVENTS
     && value.events.every(isEvent);
+}
+
+function isLegacySourceMetadata(value: unknown): boolean {
+  if (!isRecord(value) || !hasExactKeys(value, LEGACY_SOURCE_METADATA_KEYS)) {
+    return false;
+  }
+
+  return isNonNegativeInteger(value.journalFileCount)
+    && isNonNegativeInteger(value.selectedJournalFileCount)
+    && isNonNegativeInteger(value.scannedEventCount)
+    && isNonNegativeInteger(value.skippedEventCount)
+    && isNonNegativeInteger(value.channelCount)
+    && isNonNegativeInteger(value.objectCount)
+    && (value.latestObservedAt === null || isObservedTimestamp(value.latestObservedAt));
+}
+
+/**
+ * Нормализует только ранее выпущенный локальный конверт снимка. Служебные
+ * метаданные валидируются и удаляются до возврата данных через публичный API.
+ */
+export function normalizeStoredLocalSituationSnapshot(
+  value: unknown,
+): LocalSituationSnapshot | null {
+  if (isLocalSituationSnapshot(value)) {
+    return value;
+  }
+
+  if (!isRecord(value)
+    || !hasExactKeys(value, [...SNAPSHOT_KEYS, 'sourceMetadata'])
+    || !isLegacySourceMetadata(value.sourceMetadata)) {
+    return null;
+  }
+
+  const snapshotCandidate: unknown = {
+    sourceAvailability: value.sourceAvailability,
+    channels: value.channels,
+    objects: value.objects,
+    events: value.events,
+  };
+
+  return isLocalSituationSnapshot(snapshotCandidate) ? snapshotCandidate : null;
 }

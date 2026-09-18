@@ -28,7 +28,7 @@ describe('TimelinePlayback', () => {
   it('показывает управление только после загрузки наблюдаемого события', async () => {
     render(<TimelinePlayback />);
 
-    expect(screen.getByLabelText('Воспроизведение временной шкалы')).toHaveClass('glass-surface-subtle');
+    expect(screen.getByLabelText('Воспроизведение временной шкалы')).toHaveClass('surface-subtle');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Воспроизвести' })).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: 'Воспроизвести' }));
     expect(useTimelineStore.getState().isPlaying).toBe(true);

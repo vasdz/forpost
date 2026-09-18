@@ -74,6 +74,23 @@ async def get_current_subject(
     )
 
 
+async def get_current_human_subject(
+    authorization: Annotated[str | None, Header()] = None,
+) -> SecuritySubject:
+    """Отклоняет write-операции до подключения проверенной личности пользователя."""
+
+    if not is_bearer_authorization(authorization):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=unauthenticated_detail(),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=identity_provider_unavailable_detail(),
+    )
+
+
 def require_permission(perm: Permission):
     """Возвращает зависимость RBAC, сохраняющую проверенного субъекта для маршрута."""
 
