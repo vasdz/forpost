@@ -12,6 +12,7 @@ from forpost_api.routes.v1.demo_session import router as demo_session_router
 from forpost_api.routes.v1.incidents import router as incidents_router
 from forpost_api.routes.v1.maintenance import router as maintenance_router
 from forpost_api.routes.v1.risks import router as risks_router
+from forpost_api.routes.v1.topology import router as topology_router
 
 app = FastAPI(
     title="Форпост API",
@@ -37,6 +38,7 @@ app.include_router(maintenance_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(demo_session_router, prefix="/api/v1")
 app.include_router(incidents_router, prefix="/api/v1")
+app.include_router(topology_router, prefix="/api/v1")
 
 
 @app.get("/health", status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
