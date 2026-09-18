@@ -8,6 +8,7 @@ const colorByTone = {
   low: 'status-low text-[var(--color-text)]',
   neutral: 'status-neutral border-[var(--color-border)] text-[var(--color-text)]',
 };
+export type BadgeTone = keyof typeof colorByTone;
 
 function getColorClass(tone: unknown): string {
   switch (tone) {
@@ -24,6 +25,6 @@ function getColorClass(tone: unknown): string {
   }
 }
 
-export function Badge({ className, children, tone = 'neutral', ...props }: HTMLAttributes<HTMLSpanElement> & { tone?: keyof typeof colorByTone }) {
+export function Badge({ className, children, tone = 'neutral', ...props }: HTMLAttributes<HTMLSpanElement> & { tone?: BadgeTone }) {
   return <span className={cn('inline-flex items-center gap-1 rounded-[6px] border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em]', getColorClass(tone), className)} {...props}>{children}</span>;
 }

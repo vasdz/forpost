@@ -26,7 +26,7 @@ from forpost_platform.security.identity import Permission, SecuritySubject
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-from forpost_api.dependencies import get_current_human_subject
+from forpost_api.dependencies import get_current_human_subject, get_current_subject
 
 router = APIRouter(tags=["Incidents"])
 PROJECT_ROOT = Path(__file__).resolve().parents[6]
@@ -216,7 +216,7 @@ def _get_authorized_scope(
 )
 async def list_incident_decisions(
     incident_id: str,
-    subject: Annotated[SecuritySubject, Depends(get_current_human_subject)],
+    subject: Annotated[SecuritySubject, Depends(get_current_subject)],
     repository: Annotated[SqliteOperationsRepository, Depends(get_operations_repository)],
     catalog: Annotated[IncidentCatalog, Depends(get_incident_catalog)],
 ) -> list[IncidentDecision]:
@@ -273,11 +273,11 @@ async def record_incident_decision(
     response_model_by_alias=True,
 )
 async def list_service_drafts(
-    subject: Annotated[SecuritySubject, Depends(get_current_human_subject)],
+    subject: Annotated[SecuritySubject, Depends(get_current_subject)],
     repository: Annotated[SqliteOperationsRepository, Depends(get_operations_repository)],
     catalog: Annotated[IncidentCatalog, Depends(get_incident_catalog)],
 ) -> list[ServiceRequestDraft]:
-    _require(subject, Permission.CREATE_SERVICE_DRAFT)
+    _require(subject, Permission.VIEW_SERVICE_DRAFT)
     drafts = repository.list_drafts()
     if subject.can_access_resource(district=None, complex_id=None):
         return drafts

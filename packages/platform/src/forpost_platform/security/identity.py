@@ -14,6 +14,7 @@ class Permission(StrEnum):
     READ_TELEMETRY = "telemetry:read"
     VIEW_RISKS = "risks:view"
     RECORD_DECISION = "incident:decide"
+    VIEW_SERVICE_DRAFT = "service_draft:view"
     CREATE_SERVICE_DRAFT = "service_draft:create"
     RECORD_INSPECTION = "inspection:record"
     AUDIT_READ = "audit:read"
@@ -29,6 +30,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.READ_TELEMETRY,
             Permission.VIEW_RISKS,
             Permission.RECORD_DECISION,
+            Permission.VIEW_SERVICE_DRAFT,
             Permission.CREATE_SERVICE_DRAFT,
         }
     ),
@@ -37,6 +39,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.READ_TELEMETRY,
             Permission.VIEW_RISKS,
             Permission.RECORD_DECISION,
+            Permission.VIEW_SERVICE_DRAFT,
             Permission.CREATE_SERVICE_DRAFT,
         }
     ),
@@ -44,6 +47,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
         {
             Permission.READ_TELEMETRY,
             Permission.VIEW_RISKS,
+            Permission.VIEW_SERVICE_DRAFT,
             Permission.RECORD_INSPECTION,
         }
     ),

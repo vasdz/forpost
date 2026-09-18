@@ -9,6 +9,15 @@ type ProxyOptions = {
   method?: 'GET' | 'POST';
   body?: string;
   fetcher?: typeof globalThis.fetch;
+  credential?: string;
+  idempotencyKey?: string;
+};
+
+export type DemoProfile = 'district-dispatcher' | 'central-dispatcher' | 'technician' | 'admin';
+export type DemoAssertion = {
+  assertion: string;
+  expiresIn: number;
+  provenance: 'simulated';
 };
 
 function unavailableResponse(): Response {
@@ -54,9 +63,12 @@ export async function proxyForpostApi(
   path: string,
   options: ProxyOptions = {},
 ): Promise<Response> {
-  const token = process.env.FORPOST_API_SERVICE_TOKEN || '';
+  const token = options.credential ?? process.env.FORPOST_API_SERVICE_TOKEN ?? '';
   const origin = backendOrigin();
-  if (token.length < 32 || origin === null || !isAllowedBackendPath(path)) {
+  const validCredential = options.credential === undefined
+    ? token.length >= 32
+    : /^demo\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token) && token.length <= 4_101;
+  if (!validCredential || origin === null || !isAllowedBackendPath(path)) {
     return unavailableResponse();
   }
 
@@ -68,6 +80,9 @@ export async function proxyForpostApi(
   };
   if (method === 'POST') {
     headers['Content-Type'] = 'application/json';
+    if (options.idempotencyKey !== undefined) {
+      headers['Idempotency-Key'] = options.idempotencyKey;
+    }
   }
 
   try {
@@ -91,5 +106,47 @@ export async function proxyForpostApi(
     });
   } catch {
     return unavailableResponse();
+  }
+}
+
+function isDemoAssertion(value: unknown): value is DemoAssertion {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).sort().join(',') === 'assertion,expiresIn,provenance'
+    && typeof record.assertion === 'string'
+    && /^demo\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(record.assertion)
+    && record.assertion.length <= 4_101
+    && record.expiresIn === 300
+    && record.provenance === 'simulated';
+}
+
+export async function requestDemoSession(
+  profile: DemoProfile,
+  fetcher: typeof globalThis.fetch = globalThis.fetch,
+): Promise<DemoAssertion | null> {
+  const accessKey = process.env.FORPOST_DEMO_ACCESS_KEY ?? '';
+  const origin = backendOrigin();
+  if (process.env.FORPOST_DEMO_MODE !== '1' || accessKey.length < 32 || origin === null) {
+    return null;
+  }
+  try {
+    const response = await fetcher(new URL('/api/v1/demo/session', origin), {
+      method: 'POST',
+      body: JSON.stringify({ profile }),
+      cache: 'no-store',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'X-Demo-Access-Key': accessKey,
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) {
+      return null;
+    }
+    const payload: unknown = await response.json();
+    return isDemoAssertion(payload) ? payload : null;
+  } catch {
+    return null;
   }
 }

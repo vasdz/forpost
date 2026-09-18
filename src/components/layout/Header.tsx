@@ -31,6 +31,7 @@ export function getPageName(pathname: string): string {
     case '/fire-risk': return 'Пожарный риск';
     case '/unauthorized-access': return 'Несанкционированный доступ';
     case '/infrastructure-wear': return 'Износ инфраструктуры';
+    case '/topology': return 'Схема объектов';
     case '/registries': return 'Реестры';
     case '/journals': return 'Журналы';
     case '/applications': return 'Заявки';

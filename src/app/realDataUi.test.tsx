@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import ApplicationsPage from './applications/page';
@@ -10,6 +10,46 @@ import OverviewPage from './page';
 import RegistriesPage from './registries/page';
 import SensorFailurePage from './sensor-failure/page';
 import UnauthorizedAccessPage from './unauthorized-access/page';
+import TopologyPage from './topology/page';
+
+const operations = vi.hoisted(() => ({
+  fetchIncidentDecisions: vi.fn().mockResolvedValue([]),
+  fetchServiceDrafts: vi.fn().mockResolvedValue([{
+    draftId: 'draft-1',
+    incidentId: 'a'.repeat(64),
+    targetId: 'channel-1',
+    category: 'sensor_check',
+    priority: 'high',
+    recommendedAction: 'Проверить канал связи',
+    dueAt: '2026-09-19T12:00:00Z',
+    authorId: 'dispatcher-1',
+    createdAt: '2026-09-18T12:00:00Z',
+    provenance: 'simulated',
+  }]),
+  fetchTopology: vi.fn().mockResolvedValue({
+    type: 'FeatureCollection',
+    features: [{
+      type: 'Feature',
+      id: 'object-1',
+      geometry: { type: 'MultiLineString', coordinates: [[[0, 0], [0.4, 0]]] },
+      properties: {
+        objectId: 'object-1', parentId: null, objectKind: 'controlHouse',
+        dispatcherName: 'Объект 1', geometrySource: 'synthetic',
+        provenance: 'derived', coordinateProvenance: 'simulated',
+      },
+    }],
+    metadata: { title: 'Схема объектов', geometrySource: 'synthetic', coordinateProvenance: 'simulated' },
+  }),
+  getDemoSession: vi.fn().mockResolvedValue(null),
+  startDemoSession: vi.fn(),
+  recordIncidentDecision: vi.fn(),
+  createServiceDraft: vi.fn(),
+}));
+
+vi.mock('@/data/operationsClient', async () => {
+  const actual = await vi.importActual<typeof import('@/data/operationsClient')>('@/data/operationsClient');
+  return { ...actual, ...operations };
+});
 
 const localSituationState = vi.hoisted(() => ({
   value: {
@@ -30,6 +70,7 @@ const localSituationState = vi.hoisted(() => ({
         sensorType: 'Контактный',
         engineeringSystemTag: 'tag-1',
         sensorName: 'Датчик 1',
+        objectId: 'object-1',
       }],
       objects: [{
         objectId: 'object-1',
@@ -39,11 +80,15 @@ const localSituationState = vi.hoisted(() => ({
         dispatcherName: 'Объект 1',
       }],
       events: [{
+        canonicalId: 'a'.repeat(64),
         eventId: 'event-1',
         channelId: 'channel-1',
         recordedAt: '2026-08-01T23:59:58',
         isAlarm: true,
         sensorValue: 'наблюдаемое значение',
+        qualityCode: 'valid',
+        analysisEligible: true,
+        provenance: 'observed',
       }],
     },
   },
@@ -98,11 +143,37 @@ describe('интерфейс локального снимка', () => {
     expect(screen.getByRole('table', { name: 'Журнал технологических событий' })).toHaveTextContent('event-1');
   });
 
+  it('открывает проверяемую карточку тревоги с происхождением и действием', async () => {
+    render(<JournalsPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: `Открыть запись ${'a'.repeat(64)}` }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Карточка инцидента' });
+    expect(within(dialog).getByText('Наблюдение источника')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Войти как диспетчер ОДС' })).toBeInTheDocument();
+  });
+
+  it('показывает только локальные simulated-черновики заявок', async () => {
+    render(<ApplicationsPage />);
+
+    expect(screen.getByRole('heading', { name: 'Черновики заявок' })).toBeInTheDocument();
+    const table = await screen.findByRole('table', { name: 'Локальные черновики заявок' });
+    expect(table).toHaveTextContent('Проверить канал связи');
+    expect(table).toHaveTextContent('Симуляция');
+  });
+
+  it('даёт схеме постоянное предупреждение и табличную альтернативу', async () => {
+    render(<TopologyPage />);
+
+    expect(screen.getByRole('heading', { name: 'Схема объектов' })).toBeInTheDocument();
+    expect(screen.getByText(/координаты условные/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('table', { name: 'Табличное представление схемы объектов' })).toHaveTextContent('Объект 1'));
+  });
+
   it.each([
     ['Пожарный риск недоступен', FireRiskPage],
     ['Несанкционированный доступ недоступен', UnauthorizedAccessPage],
     ['Износ инфраструктуры недоступен', InfrastructureWearPage],
-    ['Заявки недоступны', ApplicationsPage],
     ['Настройки недоступны', DesignSystemPage],
   ])('не формирует вымышленные результаты: %s', (heading, Page) => {
     render(<Page />);

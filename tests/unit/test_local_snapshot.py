@@ -188,6 +188,44 @@ def test_builder_retains_only_latest_bounded_observed_events(monkeypatch, tmp_pa
     assert snapshot.source_metadata.latest_observed_at == "2026-08-01T10:00:00"
 
 
+def test_builder_reserves_alarm_inside_bounded_public_window(monkeypatch, tmp_path):
+    """Редкая тревога не должна исчезнуть из demo-очереди за более свежей телеметрией."""
+    raw_root, output_path = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(
+        raw_root,
+        events=[
+            {
+                "ид_события": "alarm",
+                "ид_канала_данных": "20",
+                "дата": "2026-08-01",
+                "время": "08:00:00",
+                "тревожное": "1",
+                "значение_датчика": "1",
+            },
+            {
+                "ид_события": "normal-1",
+                "ид_канала_данных": "20",
+                "дата": "2026-08-01",
+                "время": "09:00:00",
+                "тревожное": "0",
+                "значение_датчика": "2",
+            },
+            {
+                "ид_события": "normal-2",
+                "ид_канала_данных": "20",
+                "дата": "2026-08-01",
+                "время": "10:00:00",
+                "тревожное": "0",
+                "значение_датчика": "3",
+            },
+        ],
+    )
+
+    snapshot = build_local_snapshot(raw_root, output_path, max_events=2)
+
+    assert [event.event_id for event in snapshot.events] == ["normal-2", "alarm"]
+
+
 @pytest.mark.parametrize(
     ("alarm_value", "expected_alarm"),
     [

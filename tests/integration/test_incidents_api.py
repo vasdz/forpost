@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from forpost_api.dependencies import get_current_human_subject
+from forpost_api.dependencies import get_current_human_subject, get_current_subject
 from forpost_api.main import app
 from forpost_api.routes.v1.incidents import (
     IncidentScope,
@@ -40,6 +40,9 @@ def configure(
 ) -> None:
     app.dependency_overrides[get_operations_repository] = lambda: repository
     app.dependency_overrides[get_current_human_subject] = lambda: subject(
+        role, allowed_complexes=allowed_complexes
+    )
+    app.dependency_overrides[get_current_subject] = lambda: subject(
         role, allowed_complexes=allowed_complexes
     )
     app.dependency_overrides[get_incident_catalog] = FixedIncidentCatalog

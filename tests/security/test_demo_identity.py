@@ -33,6 +33,8 @@ def test_role_permissions_are_additive_without_admin_business_access():
     assert admin.has_permission(Permission.AUDIT_READ)
     assert combined.has_permission(Permission.RECORD_DECISION)
     assert combined.has_permission(Permission.RECORD_INSPECTION)
+    assert combined.has_permission(Permission.VIEW_SERVICE_DRAFT)
+    assert not subject(Role.TECHNICIAN).has_permission(Permission.CREATE_SERVICE_DRAFT)
 
 
 def test_subject_scope_combines_assigned_districts_and_complexes():

@@ -23,6 +23,7 @@ RAW_DATA_ROOT: Final[Path] = PROJECT_ROOT / "data" / "raw"
 PROCESSED_DATA_ROOT: Final[Path] = PROJECT_ROOT / "data" / "processed"
 MAX_SUPPLEMENTAL_JOURNAL_BYTES: Final[int] = 32 * 1024 * 1024
 MAX_EVENTS: Final[int] = 500
+ALARM_EVENT_RESERVE: Final[int] = 100
 MAX_CSV_FILES: Final[int] = 64
 # Ограничения остаются конечными, но учитывают фактические годовые выгрузки.
 MAX_CSV_FILE_BYTES: Final[int] = 4 * 1024 * 1024 * 1024
@@ -365,7 +366,9 @@ def _read_objects(path: Path) -> tuple[ObjectRegistryEntry, ...]:
 def _read_latest_events(
     journals: tuple[Path, ...], max_events: int
 ) -> tuple[tuple[ObservedEvent, ...], int, int]:
-    heap: list[tuple[datetime, int, ObservedEvent]] = []
+    recent_heap: list[tuple[datetime, int, ObservedEvent]] = []
+    alarm_heap: list[tuple[datetime, int, ObservedEvent]] = []
+    alarm_capacity = min(ALARM_EVENT_RESERVE, max_events)
     scanned_event_count = 0
     skipped_event_count = 0
     for path in journals:
@@ -381,9 +384,14 @@ def _read_latest_events(
             invalid_rows = timestamps.isna() | ~complete_rows
             skipped_event_count += int(invalid_rows.sum())
             timestamps = timestamps.loc[~invalid_rows]
-            for offset, index in enumerate(
-                timestamps.nlargest(min(max_events, len(chunk))).index, start=1
-            ):
+            recent_indices = timestamps.nlargest(min(max_events, len(timestamps))).index
+            alarm_flags = chunk.loc[timestamps.index, "тревожное"].map(_parse_alarm).eq(True)
+            alarm_timestamps = timestamps.loc[alarm_flags]
+            alarm_indices = alarm_timestamps.nlargest(
+                min(alarm_capacity, len(alarm_timestamps))
+            ).index
+            selected_indices = recent_indices.union(alarm_indices, sort=False)
+            for offset, index in enumerate(selected_indices, start=1):
                 recorded_at = timestamps.loc[index].to_pydatetime()
                 event_id = _required_value(chunk.at[index, "ид_события"])
                 channel_id = _required_value(chunk.at[index, "ид_канала_данных"])
@@ -404,15 +412,35 @@ def _read_latest_events(
                     provenance="observed",
                 )
                 candidate = (recorded_at, scanned_event_count - len(chunk) + offset, event)
-                if len(heap) < max_events:
-                    heapq.heappush(heap, candidate)
-                elif candidate[:2] > heap[0][:2]:
-                    heapq.heapreplace(heap, candidate)
+                _push_latest(recent_heap, candidate, max_events)
+                if event.is_alarm is True:
+                    _push_latest(alarm_heap, candidate, alarm_capacity)
+
+    selected: dict[str, tuple[datetime, int, ObservedEvent]] = {
+        candidate[2].canonical_id: candidate for candidate in alarm_heap
+    }
+    for candidate in sorted(recent_heap, reverse=True):
+        if len(selected) >= max_events:
+            break
+        selected.setdefault(candidate[2].canonical_id, candidate)
     return (
-        tuple(item[2] for item in sorted(heap, reverse=True)),
+        tuple(item[2] for item in sorted(selected.values(), reverse=True)),
         scanned_event_count,
         skipped_event_count,
     )
+
+
+def _push_latest(
+    heap: list[tuple[datetime, int, ObservedEvent]],
+    candidate: tuple[datetime, int, ObservedEvent],
+    capacity: int,
+) -> None:
+    if capacity <= 0:
+        return
+    if len(heap) < capacity:
+        heapq.heappush(heap, candidate)
+    elif candidate[:2] > heap[0][:2]:
+        heapq.heapreplace(heap, candidate)
 
 
 def _read_event_chunks(path: Path):

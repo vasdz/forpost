@@ -1,7 +1,7 @@
 'use client';
 
 import type { LucideIcon } from 'lucide-react';
-import { Activity, Building2, ClipboardList, FileStack, Flame, LayoutDashboard, Menu, Settings, ShieldAlert, Wrench } from 'lucide-react';
+import { Activity, Building2, ClipboardList, FileStack, Flame, LayoutDashboard, Menu, Network, Settings, ShieldAlert, Wrench } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/Button';
@@ -11,7 +11,7 @@ import { useThemeStore } from '@/stores/themeStore';
 
 type NavigationItem = { href: string; label: string; icon: LucideIcon };
 const navigation: NavigationItem[] = [
-  { href: '/', label: 'Обзор', icon: LayoutDashboard }, { href: '/sensor-failure', label: 'Отказ датчика', icon: Activity }, { href: '/fire-risk', label: 'Пожарный риск', icon: Flame }, { href: '/unauthorized-access', label: 'Несанкционированный доступ', icon: ShieldAlert }, { href: '/infrastructure-wear', label: 'Износ инфраструктуры', icon: Building2 }, { href: '/registries', label: 'Реестры', icon: FileStack }, { href: '/journals', label: 'Журналы', icon: ClipboardList }, { href: '/applications', label: 'Заявки', icon: Wrench }, { href: '/design-system', label: 'Настройки', icon: Settings },
+  { href: '/', label: 'Обзор', icon: LayoutDashboard }, { href: '/sensor-failure', label: 'Отказ датчика', icon: Activity }, { href: '/fire-risk', label: 'Пожарный риск', icon: Flame }, { href: '/unauthorized-access', label: 'Несанкционированный доступ', icon: ShieldAlert }, { href: '/infrastructure-wear', label: 'Износ инфраструктуры', icon: Building2 }, { href: '/topology', label: 'Схема объектов', icon: Network }, { href: '/registries', label: 'Реестры', icon: FileStack }, { href: '/journals', label: 'Журналы', icon: ClipboardList }, { href: '/applications', label: 'Заявки', icon: Wrench }, { href: '/design-system', label: 'Настройки', icon: Settings },
 ];
 
 export function Sidebar() {
