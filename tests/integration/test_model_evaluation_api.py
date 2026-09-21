@@ -142,12 +142,12 @@ def test_valid_evidence_never_authorizes_predictions(client, evaluation_route, s
             },
             validation_confidence_intervals={
                 name: {
-                    "lower": 0.0,
-                    "upper": 1.0,
+                    "lower": value,
+                    "upper": value,
                     "level": 0.95,
                     "method": "student_t_across_rolling_folds",
                 }
-                for name in metrics
+                for name, value in metrics.items()
             },
             quality_thresholds={
                 "minimum_precision": 0.7,

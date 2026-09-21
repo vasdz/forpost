@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
+import tempfile
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -283,7 +287,7 @@ def load_model_bundle(
         bundle = unresolved.resolve(strict=True)
         if not bundle.is_dir():
             raise ModelUnavailableError("Каталог модели не прошёл проверку")
-        manifest = _read_json(_checked_bundle_file(bundle, "manifest.json"))
+        manifest = _read_json(_read_bundle_bytes(bundle, "manifest.json"))
         if (
             set(manifest)
             != {
@@ -304,15 +308,17 @@ def load_model_bundle(
         files = manifest["files"]
         if not isinstance(files, dict) or set(files) != set(_FORMAT_FILES[model_format]):
             raise ModelUnavailableError("Manifest модели содержит неизвестный набор файлов")
+        snapshot = {}
         for name, digest in files.items():
-            path = _checked_bundle_file(bundle, name)
+            content = _read_bundle_bytes(bundle, name)
             if (
                 not isinstance(digest, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", digest)
-                or _sha256(path) != digest
+                or hashlib.sha256(content).hexdigest() != digest
             ):
                 raise ModelUnavailableError("Нарушена целостность артефактов модели")
-        card = _card_from_dict(_read_json(bundle / "model-card.json"))
+            snapshot[name] = content
+        card = _card_from_dict(_read_json(snapshot["model-card.json"]))
         validate_model_metadata(
             ModelMetadata(
                 card.task,
@@ -338,7 +344,7 @@ def load_model_bundle(
             }.items()
         ):
             raise ModelUnavailableError("Manifest модели не соответствует model card")
-        model = _load_model(bundle, card)
+        model = _load_model(snapshot, card)
         _check_model_schema(model, card)
         return ModelBundle(model=model, card=card)
     except ModelUnavailableError:
@@ -418,28 +424,43 @@ def _save_model(bundle, model, card):
     skops_io.dump(calibrator, bundle / "calibration.skops")
 
 
-def _safe_skops(path):
-    untrusted = skops_io.get_untrusted_types(file=path)
+def _safe_skops(content: bytes):
+    untrusted = skops_io.get_untrusted_types(data=content)
     if not set(untrusted) <= _ALLOWED_SKOPS_TYPES:
         raise ModelUnavailableError("Артефакт содержит недоверенные типы модели")
-    return skops_io.load(path, trusted=untrusted)
+    return skops_io.loads(content, trusted=untrusted)
 
 
-def _load_model(bundle, card):
+def _load_model(snapshot, card):
     if card.model_format == "skops":
-        model = _safe_skops(bundle / "model.skops")
+        model = _safe_skops(snapshot["model.skops"])
         _calibrated_parts(model)
         return model
-    preprocess = _safe_skops(bundle / "preprocess.skops")
-    calibrator = _safe_skops(bundle / "calibration.skops")
+    preprocess = _safe_skops(snapshot["preprocess.skops"])
+    calibrator = _safe_skops(snapshot["calibration.skops"])
     if type(preprocess) is not ColumnTransformer or type(calibrator) not in {
         IsotonicRegression,
         _SigmoidCalibration,
     }:
         raise ModelUnavailableError("Нативный bundle содержит неизвестные компоненты")
-    classifier = NativeBoosterClassifier.load_native(
-        bundle / _FORMAT_FILES[card.model_format][0], model_format=card.model_format
-    )
+    name = _FORMAT_FILES[card.model_format][0]
+    with tempfile.TemporaryDirectory(prefix="forpost-model-snapshot-") as directory:
+        private = Path(directory)
+        _protect_snapshot_directory(private)
+        native_path = private / name
+        descriptor = os.open(
+            native_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(snapshot[name])
+        # Windows запрещает замену/запись, пока native parser использует путь.
+        # POSIX защищает каталог mode 0700; повторно используется только наша копия.
+        with _opened_regular_file(native_path, MAX_MODEL_FILE_BYTES) as stream:
+            if stream.read(MAX_MODEL_FILE_BYTES + 1) != snapshot[name]:
+                raise ModelUnavailableError("Снимок нативной модели повреждён")
+            classifier = NativeBoosterClassifier.load_native(
+                native_path, model_format=card.model_format
+            )
     return _NativeCalibratedModel(preprocess, classifier, calibrator)
 
 
@@ -461,10 +482,8 @@ def _card_from_dict(payload: dict[str, object]) -> ModelCard:
         raise ModelUnavailableError("Model card не прошёл проверку схемы") from None
 
 
-def _read_json(path: Path) -> dict[str, object]:
+def _read_json(content: bytes) -> dict[str, object]:
     try:
-        with path.open("rb") as stream:
-            content = stream.read(MAX_METADATA_BYTES + 1)
         if len(content) > MAX_METADATA_BYTES:
             raise ValueError
         value = json.loads(content)
@@ -484,6 +503,130 @@ def _checked_bundle_file(bundle: Path, name: str) -> Path:
     if path.parent != bundle or not path.is_file() or path.stat().st_size > limit:
         raise ModelUnavailableError("Файл модели не прошёл проверку пути или размера")
     return path
+
+
+def _read_bundle_bytes(bundle: Path, name: str) -> bytes:
+    """Единственный ограниченный снимок: hash и parser получают те же bytes."""
+    path = _checked_bundle_file(bundle, name)
+    limit = MAX_METADATA_BYTES if name.endswith(".json") else MAX_MODEL_FILE_BYTES
+    with _opened_regular_file(path, limit) as stream:
+        content = stream.read(limit + 1)
+        if len(content) > limit:
+            raise ModelUnavailableError("Файл модели превышает допустимый размер")
+        return content
+
+
+@contextmanager
+def _opened_regular_file(path: Path, limit: int):
+    """Проверяет открытый handle и запрещает следование финальному symlink."""
+    descriptor = _open_readonly_nofollow(path)
+    with os.fdopen(descriptor, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        linked = path.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_size > limit
+            or not os.path.samestat(opened, linked)
+            or stat.S_ISLNK(linked.st_mode)
+            or getattr(linked, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            raise ModelUnavailableError("Открытый файл модели не прошёл проверку")
+        yield stream
+
+
+def _open_readonly_nofollow(path: Path) -> int:
+    if os.name != "nt":
+        # Каждый каталог открывается относительно уже закреплённого descriptor.
+        parts = path.absolute().parts
+        directory = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for component in parts[1:-1]:
+                child = os.open(
+                    component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory
+                )
+                os.close(directory)
+                directory = child
+            return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create.restype = wintypes.HANDLE
+    # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT.
+    handle = create(str(path), 0x80000000, 1, None, 3, 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise OSError("Не удалось безопасно открыть файл модели")
+    try:
+        final_path = kernel.GetFinalPathNameByHandleW
+        final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+        final_path.restype = wintypes.DWORD
+        capacity = final_path(handle, None, 0, 0)
+        if capacity == 0:
+            raise OSError("Не удалось проверить путь открытого файла")
+        buffer = ctypes.create_unicode_buffer(capacity + 1)
+        written = final_path(handle, buffer, len(buffer), 0)
+        if not 0 < written < len(buffer):
+            raise OSError("Не удалось проверить путь открытого файла")
+        actual = buffer.value
+        if actual.startswith("\\\\?\\UNC\\"):
+            actual = "\\\\" + actual[8:]
+        else:
+            actual = actual.removeprefix("\\\\?\\")
+        if os.path.normcase(actual) != os.path.normcase(str(path.absolute())):
+            raise OSError("Открытый файл перенаправлен за пределы проверенного пути")
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        close = kernel.CloseHandle
+        close.argtypes = [wintypes.HANDLE]
+        close(handle)
+        raise
+
+
+def _protect_snapshot_directory(path: Path) -> None:
+    """Даёт доступ к временной native-копии только владельцу (и SYSTEM в Windows)."""
+    if os.name != "nt":
+        path.chmod(0o700)
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    convert = security.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        wintypes.LPVOID,
+    ]
+    convert.restype = wintypes.BOOL
+    apply = security.SetFileSecurityW
+    apply.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
+    apply.restype = wintypes.BOOL
+    release = kernel.LocalFree
+    release.argtypes = [wintypes.LPVOID]
+    descriptor = wintypes.LPVOID()
+    if not convert("D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)", 1, ctypes.byref(descriptor), None):
+        raise OSError("Не удалось защитить каталог снимка модели")
+    try:
+        if not apply(str(path), 0x80000004, descriptor):
+            raise OSError("Не удалось защитить каталог снимка модели")
+    finally:
+        release(descriptor)
 
 
 def _sha256(path: Path) -> str:

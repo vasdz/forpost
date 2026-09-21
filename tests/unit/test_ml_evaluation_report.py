@@ -81,12 +81,12 @@ def report_payload(status="rejected"):
         else {},
         "validation_confidence_intervals": {
             name: {
-                "lower": 0.0,
-                "upper": 1.0,
+                "lower": value,
+                "upper": value,
                 "level": 0.95,
                 "method": "student_t_across_rolling_folds",
             }
-            for name in metrics
+            for name, value in metrics.items()
         }
         if status == "published"
         else {},
@@ -204,6 +204,19 @@ def test_validation_intervals_describe_fold_mean_without_reading_final_test(repo
     assert interval["upper"] == pytest.approx(0.9484138, abs=1e-6)
     assert interval["level"] == 0.95
     assert "test_metrics" not in payload
+
+
+def test_published_report_rejects_fabricated_zero_width_student_t_interval(reports):
+    payload = report_payload("published")
+    for fold, value in zip(payload["rolling_folds"], (0.6, 0.7, 0.8), strict=True):
+        fold["metrics"]["precision"] = value
+    payload["validation_metrics"]["precision"] = 0.7
+    payload["operating_profiles"]["balanced"]["precision"] = 0.7
+    payload["validation_confidence_intervals"]["precision"].update(
+        lower=0.6999999999999998, upper=0.6999999999999998
+    )
+    with pytest.raises(ValidationError):
+        reports.EvaluationReport.model_validate(payload)
 
 
 @pytest.mark.parametrize("value", [0, -1, 8761, 1.5, "24", True, float("inf")])

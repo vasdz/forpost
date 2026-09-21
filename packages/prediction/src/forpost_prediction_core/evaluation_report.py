@@ -115,10 +115,13 @@ class ValidationEvidence(ExactModel):
         if sum(fold.validation_rows for fold in self.rolling_folds) != validation_rows:
             raise ValueError("Размер validation не соответствует rolling folds")
         for name in EvaluationMetrics.model_fields:
-            mean = float(np.mean([fold.metrics[name] for fold in self.rolling_folds]))
+            values = [fold.metrics[name] for fold in self.rolling_folds]
+            mean = float(np.mean(values))
             interval = self.validation_confidence_intervals[name]
-            if not np.isclose(metrics[name], mean, rtol=1e-10, atol=1e-12) or not (
-                interval.lower <= mean <= interval.upper
+            expected = _fold_interval(values)
+            if not np.isclose(metrics[name], mean, rtol=1e-10, atol=1e-12) or any(
+                not np.isclose(getattr(interval, bound), expected[bound], rtol=1e-10, atol=1e-12)
+                for bound in ("lower", "upper")
             ):
                 raise ValueError("Агрегат или интервал не соответствует rolling folds")
         profile = self.operating_profiles["balanced"]

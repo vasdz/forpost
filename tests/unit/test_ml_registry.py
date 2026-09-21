@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -320,12 +322,12 @@ def _audit_fields(
         },
         "validation_confidence_intervals": {
             name: {
-                "lower": 0.0,
-                "upper": 1.0,
+                "lower": value,
+                "upper": value,
                 "level": 0.95,
                 "method": "student_t_across_rolling_folds",
             }
-            for name in _complete_metrics(precision=0.8, recall=0.7, f1=0.75)
+            for name, value in _complete_metrics(precision=0.8, recall=0.7, f1=0.75).items()
         },
         "label_strategy": "silence_horizon_proxy",
         "horizon_hours": 24,
@@ -398,14 +400,14 @@ def _load(path):
 def test_release_requires_roundtrip_parity_before_creating_version(tmp_path, monkeypatch):
     from forpost_prediction_core import registry
 
-    original = registry.skops_io.load
+    original = registry.skops_io.loads
 
     def broken(*args, **kwargs):
         restored = original(*args, **kwargs)
         restored.calibrated_classifiers_[0].calibrators[0].a_ *= -1
         return restored
 
-    monkeypatch.setattr(registry.skops_io, "load", broken)
+    monkeypatch.setattr(registry.skops_io, "loads", broken)
     with pytest.raises(ModelUnavailableError):
         publish_model_bundle(
             tmp_path, _calibrated_model(), _model_card(), parity_features=_features()
@@ -516,3 +518,98 @@ def test_native_bundle_checks_hashes_for_every_component(tmp_path, component):
         stream.write(b"tampered")
     with pytest.raises(ModelUnavailableError, match="целостност"):
         _load(bundle)
+
+
+def test_skops_replacement_after_verification_cannot_change_loaded_model(tmp_path, monkeypatch):
+    from forpost_prediction_core import registry
+
+    model = _calibrated_model()
+    bundle = publish_model_bundle(tmp_path, model, _model_card(), parity_features=_features())
+    replacement = _calibrated_model()
+    replacement.calibrated_classifiers_[0].calibrators[0].a_ *= -1
+    inspect_types = registry.skops_io.get_untrusted_types
+
+    def replace_after_inspection(*args, **kwargs):
+        untrusted = inspect_types(*args, **kwargs)
+        registry.skops_io.dump(replacement, bundle / "model.skops")
+        return untrusted
+
+    monkeypatch.setattr(registry.skops_io, "get_untrusted_types", replace_after_inspection)
+    restored = _load(bundle)
+    np.testing.assert_allclose(
+        restored.model.predict_proba(_features()),
+        model.predict_proba(_features()),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+
+@pytest.mark.parametrize(
+    "backend,model_format", [("catboost", "catboost_cbm"), ("lightgbm", "lightgbm_text")]
+)
+@pytest.mark.parametrize("fail_loading", [False, True])
+def test_native_loader_uses_private_verified_snapshot_and_cleans_it(
+    tmp_path, monkeypatch, backend, model_format, fail_loading
+):
+    from forpost_prediction_core.candidates import (
+        NativeBoosterClassifier,
+        build_candidate_estimators,
+    )
+
+    features = pd.DataFrame({"hours_since_last_event": np.tile([0.0, 1.0], 40)})
+    labels = np.tile([0, 1], 40)
+    estimator = build_candidate_estimators(features, 73)[backend].fit(features, labels)
+    model = CalibratedClassifierCV(FrozenEstimator(estimator), ensemble=False).fit(features, labels)
+    card = _model_card().model_copy(update={"model_format": model_format})
+    bundle = publish_model_bundle(tmp_path, model, card, parity_features=features)
+    source = bundle / ("model.cbm" if backend == "catboost" else "model.txt")
+    expected_bytes = source.read_bytes()
+    load_native = NativeBoosterClassifier.load_native
+    snapshot_paths = []
+
+    def replace_original_then_load(path, *, model_format):
+        snapshot_paths.append(path)
+        source.write_bytes(b"replaced after integrity check")
+        assert path != source
+        assert path.read_bytes() == expected_bytes
+        if os.name == "nt":
+            with pytest.raises(PermissionError):
+                path.write_bytes(b"snapshot replacement")
+            with pytest.raises(PermissionError):
+                path.unlink()
+        else:
+            assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        if fail_loading:
+            raise ValueError("native failure")
+        return load_native(path, model_format=model_format)
+
+    monkeypatch.setattr(NativeBoosterClassifier, "load_native", replace_original_then_load)
+    if fail_loading:
+        with pytest.raises(ModelUnavailableError):
+            _load(bundle)
+    else:
+        restored = _load(bundle)
+        np.testing.assert_allclose(
+            restored.model.predict_proba(features),
+            model.predict_proba(features),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+    assert snapshot_paths
+    assert all(not path.exists() and not path.parent.exists() for path in snapshot_paths)
+
+
+def test_model_card_rejects_fabricated_student_t_bounds():
+    from pydantic import ValidationError
+
+    payload = _model_card().model_dump(mode="json")
+    for fold, value in zip(payload["rolling_folds"], (0.6, 0.7, 0.8), strict=True):
+        fold["metrics"]["precision"] = value
+    payload["validation_metrics"]["precision"] = 0.7
+    payload["operating_profiles"]["balanced"]["precision"] = 0.7
+    payload["validation_confidence_intervals"]["precision"].update(
+        lower=0.6999999999999998, upper=0.6999999999999998
+    )
+    with pytest.raises(ValidationError):
+        ModelCard.model_validate(payload)
