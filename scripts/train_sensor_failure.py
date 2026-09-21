@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from pydantic import TypeAdapter
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 for source_path in (
@@ -32,6 +33,7 @@ from forpost_prediction_core.dataset import build_sensor_failure_dataset
 from forpost_prediction_core.evaluation_report import (
     EvaluationReport,
     EvaluationReportUnavailableError,
+    EvaluationVersion,
     QualityThresholds,
     write_evaluation_report,
 )
@@ -68,10 +70,16 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> int:
     arguments = parse_arguments()
     evidence = TrainingEvidence()
-    ml_config = None
+    # При отказе версии v1 обозначает только каноническую версию rejected-отчёта.
+    report_version = "v1"
+    quality_thresholds = None
     stage = "configuration"
     try:
+        report_version = TypeAdapter(EvaluationVersion).validate_python(arguments.version)
         ml_config = load_ml_config(REPOSITORY_ROOT / "ml" / "config.yaml")
+        quality_thresholds = QualityThresholds.model_validate(
+            {name: getattr(ml_config.training, name) for name in QualityThresholds.model_fields}
+        )
         stage = "source"
         window = load_training_window(arguments.raw_root, max_events=ml_config.max_training_events)
         stage = "dataset"
@@ -162,10 +170,22 @@ def main() -> int:
             "inference": "inference_unavailable",
             "release": "release_unavailable",
         }[failure_stage]
-        _save_report(arguments, ml_config, evidence, reason_code=reason_code)
+        _save_report(
+            arguments,
+            evidence,
+            version=report_version,
+            quality_thresholds=quality_thresholds,
+            reason_code=reason_code,
+        )
         print(f"Обучение не опубликовано: {reason_code}", file=sys.stderr)
         return 1
-    if not _save_report(arguments, ml_config, evidence, result=result):
+    if not _save_report(
+        arguments,
+        evidence,
+        version=report_version,
+        quality_thresholds=quality_thresholds,
+        result=result,
+    ):
         return 1
     summary = {
         "status": "published",
@@ -180,26 +200,21 @@ def main() -> int:
     return 0
 
 
-def _save_report(arguments, ml_config, evidence, *, reason_code=None, result=None) -> bool:
+def _save_report(
+    arguments, evidence, *, version, quality_thresholds, reason_code=None, result=None
+) -> bool:
     """Сохраняет только доступные доказательства, не раскрывая текст исключений."""
     try:
-        thresholds = (
-            None
-            if ml_config is None
-            else {
-                name: getattr(ml_config.training, name) for name in QualityThresholds.model_fields
-            }
-        )
         report = EvaluationReport(
             format_version=1,
             task="sensor_failure",
-            version=arguments.version,
+            version=version,
             status="rejected" if reason_code is not None else "published",
             evidence_tier="proxy",
             label_strategy="silence_horizon_proxy",
             created_at=datetime.now(UTC),
             reason_code=reason_code,
-            quality_thresholds=thresholds,
+            quality_thresholds=quality_thresholds,
             split_sizes=evidence.split_sizes,
             baseline_validation_pr_auc=evidence.baseline_validation_pr_auc,
             validation_metrics=(

@@ -11,6 +11,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationErro
 
 MAX_EVALUATION_REPORT_BYTES = 256 * 1024
 UnitMetric = Annotated[float, Field(strict=True, ge=0, le=1, allow_inf_nan=False)]
+EvaluationVersion = Annotated[str, Field(pattern=r"^v[1-9][0-9]*$", max_length=32)]
 ReasonCode = Literal[
     "configuration_invalid",
     "source_unavailable",
@@ -61,7 +62,7 @@ class SplitSizes(ExactModel):
 class EvaluationReport(ExactModel):
     format_version: Literal[1]
     task: Literal["sensor_failure"]
-    version: Annotated[str, Field(pattern=r"^v[1-9][0-9]*$", max_length=32)]
+    version: EvaluationVersion
     status: Literal["rejected", "published"]
     evidence_tier: Literal["proxy"]
     label_strategy: Literal["silence_horizon_proxy"]

@@ -27,7 +27,10 @@ class MlConfig:
 def load_ml_config(path: Path) -> MlConfig:
     """Читает YAML без неявных defaults и проверяет все поля политики."""
     raw = Path(path).read_bytes()
-    payload = yaml.safe_load(raw)
+    try:
+        payload = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        raise ValueError("ML-конфиг содержит некорректный YAML") from None
     required = {
         "seed",
         "feature_schema_version",

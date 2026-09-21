@@ -376,3 +376,98 @@ def test_cleanup_failure_does_not_leak_path(reports, tmp_path, monkeypatch):
             path, reports.EvaluationReport.model_validate(report_payload())
         )
     assert "private-source" not in str(error.value)
+
+
+def test_malformed_yaml_replaces_stale_published_report(command, reports, monkeypatch, capsys):
+    from forpost_prediction_core.config import load_ml_config
+
+    module, arguments, _config = command
+    malformed_path = arguments.evaluation_report.parent / "private-config.yaml"
+    malformed_path.write_text("private_source: [secret.xlsx", encoding="utf-8")
+    reports.write_evaluation_report(
+        arguments.evaluation_report,
+        reports.EvaluationReport.model_validate(report_payload("published")),
+    )
+    monkeypatch.setattr(module, "load_ml_config", lambda _path: load_ml_config(malformed_path))
+
+    def prohibit_source(*_args, **_kwargs):
+        pytest.fail("Некорректная конфигурация дошла до загрузки данных")
+
+    monkeypatch.setattr(module, "load_training_window", prohibit_source)
+    assert module.main() == 1
+    report = reports.load_evaluation_report(arguments.evaluation_report)
+    assert report.status == "rejected"
+    assert report.reason_code == "configuration_invalid"
+    assert report.quality_thresholds is None
+    assert report.test_metrics is None
+    captured = capsys.readouterr()
+    assert "private" not in captured.err
+    assert "secret.xlsx" not in captured.err
+    assert "evaluation_write_failed" not in captured.err
+
+
+@pytest.mark.parametrize("invalid_version", ["v0", "../../private", "", "v" + "9" * 32])
+def test_invalid_version_replaces_stale_report_before_loading_data(
+    command, reports, monkeypatch, capsys, invalid_version
+):
+    module, arguments, _config = command
+    arguments.version = invalid_version
+    reports.write_evaluation_report(
+        arguments.evaluation_report,
+        reports.EvaluationReport.model_validate(report_payload("published")),
+    )
+
+    def prohibit_source(*_args, **_kwargs):
+        pytest.fail("Некорректная версия дошла до загрузки данных")
+
+    monkeypatch.setattr(module, "load_training_window", prohibit_source)
+    assert module.main() == 1
+    report = reports.load_evaluation_report(arguments.evaluation_report)
+    assert report.status == "rejected"
+    assert report.version == "v1"
+    assert report.reason_code == "configuration_invalid"
+    assert report.test_metrics is None
+    assert not arguments.registry_root.exists()
+    captured = capsys.readouterr()
+    assert "private" not in captured.err
+    assert "evaluation_write_failed" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "minimum_precision",
+        "minimum_recall",
+        "maximum_alert_rate",
+        "maximum_expected_calibration_error",
+        "maximum_brier_score",
+        "minimum_baseline_pr_auc_delta",
+    ],
+)
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("inf"), float("nan")])
+def test_invalid_config_threshold_replaces_stale_report_before_loading_data(
+    command, reports, monkeypatch, capsys, field, value
+):
+    from dataclasses import replace
+
+    module, arguments, config = command
+    arguments.version = "v2"
+    config.training = replace(config.training, **{field: value})
+    reports.write_evaluation_report(
+        arguments.evaluation_report,
+        reports.EvaluationReport.model_validate(report_payload("published")),
+    )
+
+    def prohibit_source(*_args, **_kwargs):
+        pytest.fail("Непроверенные пороги дошли до загрузки данных")
+
+    monkeypatch.setattr(module, "load_training_window", prohibit_source)
+    assert module.main() == 1
+    report = reports.load_evaluation_report(arguments.evaluation_report)
+    assert report.status == "rejected"
+    assert report.version == "v2"
+    assert report.reason_code == "configuration_invalid"
+    assert report.quality_thresholds is None
+    assert report.test_metrics is None
+    assert report.validation_metrics is None
+    assert "evaluation_write_failed" not in capsys.readouterr().err

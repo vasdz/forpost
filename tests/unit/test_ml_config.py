@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from forpost_prediction_core.config import load_ml_config
 
 
@@ -16,3 +17,16 @@ def test_repository_ml_config_is_single_source_for_training_policy():
     assert config.training.minimum_precision == 0.7
     assert config.training.minimum_recall == 0.5
     assert len(config.sha256) == 64
+
+
+@pytest.mark.parametrize("content", [b"private_source: [secret.xlsx", b"\xff"])
+def test_malformed_yaml_is_translated_to_safe_controlled_error(tmp_path, content):
+    config_path = tmp_path / "private-config.yaml"
+    config_path.write_bytes(content)
+
+    with pytest.raises(ValueError) as error:
+        load_ml_config(config_path)
+
+    assert "private" not in str(error.value)
+    assert "secret.xlsx" not in str(error.value)
+    assert error.value.__suppress_context__
