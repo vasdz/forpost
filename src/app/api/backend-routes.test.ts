@@ -44,13 +44,13 @@ describe('same-origin backend routes', () => {
     expect(backend.proxyForpostApi).not.toHaveBeenCalled();
   });
 
-  it('передаёт valid demo-утверждение как scoped credential и сохраняет 503 backend', async () => {
-    backend.proxyForpostApi.mockResolvedValue(Response.json({ status: 'unavailable' }, { status: 503 }));
+  it.each([401, 503])('передаёт scoped demo-утверждение и сохраняет статус %s backend', async (status) => {
+    backend.proxyForpostApi.mockResolvedValue(Response.json({ status: 'unavailable' }, { status }));
     const response = await getModelEvaluation(new Request('http://127.0.0.1/api/model-evaluation', {
       headers: { cookie: `forpost_demo_session=${DEMO_ASSERTION}; forpost_csrf=${'c'.repeat(40)}` },
     }));
 
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(status);
     expect(backend.proxyForpostApi).toHaveBeenCalledWith('/api/model-evaluation', { credential: DEMO_ASSERTION });
   });
 

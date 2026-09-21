@@ -96,6 +96,7 @@ def test_valid_evidence_never_authorizes_predictions(client, evaluation_route, s
         "status": status,
         "evidence_tier": "proxy",
         "label_strategy": "silence_horizon_proxy",
+        "horizon_hours": 48,
         "created_at": "2026-09-21T10:00:00Z",
         "reason_code": "validation_rejected",
         "quality_thresholds": None,

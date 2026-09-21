@@ -37,6 +37,7 @@ def report_payload(status="rejected"):
         "status": status,
         "evidence_tier": "proxy",
         "label_strategy": "silence_horizon_proxy",
+        "horizon_hours": 48,
         "created_at": "2026-09-21T10:00:00Z",
         "reason_code": "validation_rejected" if status == "rejected" else None,
         "quality_thresholds": {
@@ -103,6 +104,7 @@ def test_report_refuses_nonfinite_or_unbounded_metrics(reports, value):
         "split_sizes",
         "quality_thresholds",
         "champion_name",
+        "horizon_hours",
     ],
 )
 def test_published_report_requires_completed_evidence(reports, field):
@@ -110,6 +112,23 @@ def test_published_report_requires_completed_evidence(reports, field):
     payload[field] = None
     with pytest.raises(ValidationError):
         reports.EvaluationReport.model_validate(payload)
+
+
+@pytest.mark.parametrize("value", [0, -1, 8761, 1.5, "24", True, float("inf")])
+def test_report_rejects_invalid_horizon(reports, value):
+    payload = report_payload()
+    payload["horizon_hours"] = value
+    with pytest.raises(ValidationError):
+        reports.EvaluationReport.model_validate(payload)
+
+
+@pytest.mark.parametrize("value", [None, 1, 48, 8760])
+def test_rejected_report_retains_nullable_bounded_horizon(reports, value):
+    payload = report_payload()
+    payload["horizon_hours"] = value
+    report = reports.EvaluationReport.model_validate(payload)
+    assert report.horizon_hours == value
+    assert report.test_metrics is None
 
 
 def test_failed_atomic_replace_preserves_previous_report(reports, tmp_path, monkeypatch):
@@ -240,14 +259,14 @@ def command(tmp_path, monkeypatch):
     )
     config = SimpleNamespace(
         max_training_events=1000,
-        horizon_hours=24,
+        horizon_hours=48,
         cutoff_count=80,
         feature_windows_hours=(24,),
         feature_schema_version="sensor-failure-v1",
         label_strategy="silence_horizon_proxy",
         sha256="a" * 64,
         training=TrainingConfig(
-            purge_hours=24,
+            purge_hours=48,
             minimum_precision=0.5,
             minimum_recall=0.5,
             maximum_alert_rate=0.6,
@@ -283,6 +302,7 @@ def test_command_writes_published_report_only_after_real_release(command, report
     assert module.main() == 0
     report = reports.load_evaluation_report(arguments.evaluation_report)
     assert report.status == "published"
+    assert report.horizon_hours == 48
     assert report.test_metrics is not None
     card_path = arguments.registry_root / "sensor_failure" / "v1" / "model-card.json"
     card = json.loads(card_path.read_text(encoding="utf-8"))
@@ -298,9 +318,11 @@ def test_command_rejects_validation_without_release_or_test_evidence(command, re
     report = reports.load_evaluation_report(arguments.evaluation_report)
     assert report.status == "rejected"
     assert report.reason_code == "validation_rejected"
-    assert report.baseline_validation_pr_auc == 0.25
-    # Из 16 дней validation один день удалён embargo перед test.
-    assert report.split_sizes.validation == 60
+    assert report.horizon_hours == 48
+    # В оставшихся 56 строках validation — 13 положительных proxy-меток.
+    assert report.baseline_validation_pr_auc == pytest.approx(13 / 56)
+    # Из 16 дней validation два дня удалены embargo перед test.
+    assert report.split_sizes.validation == 56
     assert report.test_metrics is None
     assert not arguments.registry_root.exists()
 
@@ -322,6 +344,7 @@ def test_command_replaces_stale_report_on_source_failure_without_leaking_error(
     report = reports.load_evaluation_report(arguments.evaluation_report)
     assert report.status == "rejected"
     assert report.reason_code == "source_unavailable"
+    assert report.horizon_hours == 48
     assert report.validation_metrics is None
     assert report.test_metrics is None
     assert "private-source" not in capsys.readouterr().err
@@ -398,6 +421,7 @@ def test_malformed_yaml_replaces_stale_published_report(command, reports, monkey
     report = reports.load_evaluation_report(arguments.evaluation_report)
     assert report.status == "rejected"
     assert report.reason_code == "configuration_invalid"
+    assert report.horizon_hours is None
     assert report.quality_thresholds is None
     assert report.test_metrics is None
     captured = capsys.readouterr()

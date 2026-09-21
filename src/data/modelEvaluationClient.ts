@@ -45,6 +45,7 @@ export type ModelEvaluation = {
   status: EvaluationStatus;
   evidenceTier: 'proxy';
   labelStrategy: 'silence_horizon_proxy';
+  horizonHours: number | null;
   createdAt: string;
   reasonCode: EvaluationReasonCode | null;
   qualityThresholds: QualityThresholds | null;
@@ -58,12 +59,13 @@ export type ModelEvaluation = {
 
 export type ModelEvaluationFeed =
   | { status: 'ready'; evaluation: ModelEvaluation }
+  | { status: 'unauthenticated' }
   | { status: 'unavailable' };
 
 const metricKeys = ['precision', 'recall', 'f1', 'pr_auc', 'roc_auc', 'brier_score', 'expected_calibration_error', 'alert_rate'] as const;
 const thresholdKeys = ['minimum_precision', 'minimum_recall', 'maximum_alert_rate', 'maximum_expected_calibration_error', 'maximum_brier_score', 'minimum_baseline_pr_auc_delta'] as const;
 const splitKeys = ['fit', 'calibration', 'validation', 'test'] as const;
-const reportKeys = ['format_version', 'task', 'version', 'status', 'evidence_tier', 'label_strategy', 'created_at', 'reason_code', 'quality_thresholds', 'split_sizes', 'baseline_validation_pr_auc', 'validation_metrics', 'test_metrics', 'threshold', 'champion_name'] as const;
+const reportKeys = ['format_version', 'task', 'version', 'status', 'evidence_tier', 'label_strategy', 'horizon_hours', 'created_at', 'reason_code', 'quality_thresholds', 'split_sizes', 'baseline_validation_pr_auc', 'validation_metrics', 'test_metrics', 'threshold', 'champion_name'] as const;
 const reasonCodes: readonly EvaluationReasonCode[] = ['configuration_invalid', 'source_unavailable', 'dataset_unavailable', 'training_unavailable', 'validation_rejected', 'test_rejected', 'inference_unavailable', 'release_unavailable'];
 const candidates: readonly CandidateName[] = ['extra_trees_isotonic', 'extra_trees_sigmoid', 'hist_gradient_boosting_isotonic', 'hist_gradient_boosting_sigmoid', 'logistic_regression_isotonic', 'logistic_regression_sigmoid'];
 
@@ -71,7 +73,8 @@ export async function fetchModelEvaluation(
   fetcher: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<ModelEvaluationFeed> {
   try {
-    const response = await fetcher('/api/model-evaluation', { cache: 'no-store' });
+    const response = await fetcher('/api/model-evaluation', { cache: 'no-store', credentials: 'same-origin' });
+    if (response.status === 401) return { status: 'unauthenticated' };
     if (!response.ok || !response.headers.get('content-type')?.toLowerCase().includes('application/json')) return unavailableFeed();
     const evaluation = parseModelEvaluation(await response.json());
     return evaluation === null ? unavailableFeed() : { status: 'ready', evaluation };
@@ -92,6 +95,7 @@ function parseModelEvaluation(value: unknown): ModelEvaluation | null {
     || !isEvaluationStatus(value.status)
     || value.evidence_tier !== 'proxy'
     || value.label_strategy !== 'silence_horizon_proxy'
+    || !isHorizonOrNull(value.horizon_hours)
     || !isTimestampWithTimezone(value.created_at)
     || !isReasonCodeOrNull(value.reason_code)
     || !isQualityThresholdsOrNull(value.quality_thresholds)
@@ -112,6 +116,7 @@ function parseModelEvaluation(value: unknown): ModelEvaluation | null {
     status: value.status,
     evidenceTier: 'proxy',
     labelStrategy: 'silence_horizon_proxy',
+    horizonHours: value.horizon_hours,
     createdAt: value.created_at,
     reasonCode: value.reason_code,
     qualityThresholds: mapThresholds(value.quality_thresholds),
@@ -126,6 +131,7 @@ function parseModelEvaluation(value: unknown): ModelEvaluation | null {
 
 function allEvidencePresent(value: Record<string, unknown>): boolean {
   return value.quality_thresholds !== null
+    && value.horizon_hours !== null
     && value.split_sizes !== null
     && value.baseline_validation_pr_auc !== null
     && value.validation_metrics !== null
@@ -190,6 +196,10 @@ function isSplitSizesOrNull(value: unknown): value is SplitSizes | null {
 
 function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function isHorizonOrNull(value: unknown): value is number | null {
+  return value === null || (isPositiveSafeInteger(value) && value <= 8760);
 }
 
 function isThresholdOrNull(value: unknown): value is number | null {

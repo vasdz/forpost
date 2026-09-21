@@ -31,6 +31,7 @@ from forpost_prediction_core.capabilities import EvidenceTier, PredictionTask
 from forpost_prediction_core.config import load_ml_config
 from forpost_prediction_core.dataset import build_sensor_failure_dataset
 from forpost_prediction_core.evaluation_report import (
+    EvaluationHorizonHours,
     EvaluationReport,
     EvaluationReportUnavailableError,
     EvaluationVersion,
@@ -73,6 +74,7 @@ def main() -> int:
     # При отказе версии v1 обозначает только каноническую версию rejected-отчёта.
     report_version = "v1"
     quality_thresholds = None
+    horizon_hours = None
     stage = "configuration"
     try:
         report_version = TypeAdapter(EvaluationVersion).validate_python(arguments.version)
@@ -80,6 +82,7 @@ def main() -> int:
         quality_thresholds = QualityThresholds.model_validate(
             {name: getattr(ml_config.training, name) for name in QualityThresholds.model_fields}
         )
+        horizon_hours = TypeAdapter(EvaluationHorizonHours).validate_python(ml_config.horizon_hours)
         stage = "source"
         window = load_training_window(arguments.raw_root, max_events=ml_config.max_training_events)
         stage = "dataset"
@@ -175,6 +178,7 @@ def main() -> int:
             evidence,
             version=report_version,
             quality_thresholds=quality_thresholds,
+            horizon_hours=horizon_hours if stage != "configuration" else None,
             reason_code=reason_code,
         )
         print(f"Обучение не опубликовано: {reason_code}", file=sys.stderr)
@@ -184,6 +188,7 @@ def main() -> int:
         evidence,
         version=report_version,
         quality_thresholds=quality_thresholds,
+        horizon_hours=horizon_hours,
         result=result,
     ):
         return 1
@@ -201,7 +206,14 @@ def main() -> int:
 
 
 def _save_report(
-    arguments, evidence, *, version, quality_thresholds, reason_code=None, result=None
+    arguments,
+    evidence,
+    *,
+    version,
+    quality_thresholds,
+    horizon_hours,
+    reason_code=None,
+    result=None,
 ) -> bool:
     """Сохраняет только доступные доказательства, не раскрывая текст исключений."""
     try:
@@ -212,6 +224,7 @@ def _save_report(
             status="rejected" if reason_code is not None else "published",
             evidence_tier="proxy",
             label_strategy="silence_horizon_proxy",
+            horizon_hours=horizon_hours,
             created_at=datetime.now(UTC),
             reason_code=reason_code,
             quality_thresholds=quality_thresholds,

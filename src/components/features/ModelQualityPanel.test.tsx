@@ -12,6 +12,7 @@ const publishedReport = {
   status: 'published' as const,
   evidenceTier: 'proxy' as const,
   labelStrategy: 'silence_horizon_proxy' as const,
+  horizonHours: 48,
   createdAt: '2026-09-21T12:00:00+03:00',
   reasonCode: null,
   qualityThresholds: {
@@ -56,6 +57,8 @@ describe('ModelQualityPanel', () => {
     expect(within(table).getByText('0,790')).toBeInTheDocument();
     expect(screen.getByText('Минимальная точность')).toBeInTheDocument();
     expect(screen.getByText('Обучение')).toBeInTheDocument();
+    expect(screen.getByText('Горизонт оценки')).toBeInTheDocument();
+    expect(screen.getByText('48 ч')).toBeInTheDocument();
     expect(screen.getByText('120')).toBeInTheDocument();
     expect(screen.getByText(/отчёт об оценке не является прогнозом/i)).toBeInTheDocument();
   });

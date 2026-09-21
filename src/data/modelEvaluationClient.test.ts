@@ -8,6 +8,7 @@ const validReport = {
   status: 'published',
   evidence_tier: 'proxy',
   label_strategy: 'silence_horizon_proxy',
+  horizon_hours: 48,
   created_at: '2026-09-21T12:00:00+03:00',
   reason_code: null,
   quality_thresholds: {
@@ -52,6 +53,22 @@ function jsonResponse(payload: unknown, status = 200) {
 }
 
 describe('fetchModelEvaluation', () => {
+  it('отличает отсутствие пользовательской сессии 401 от недоступности 503', async () => {
+    expect(await fetchModelEvaluation(async () => jsonResponse({}, 401))).toEqual({ status: 'unauthenticated' });
+    expect(await fetchModelEvaluation(async () => jsonResponse({}, 503))).toEqual({ status: 'unavailable' });
+  });
+  it.each([0, -1, 8761, 1.5, '24', true, null, undefined])('отклоняет опубликованный горизонт %s', async (horizon) => {
+    const fetcher = vi.fn(async () => jsonResponse({ ...validReport, horizon_hours: horizon }));
+    expect(await fetchModelEvaluation(fetcher)).toEqual({ status: 'unavailable' });
+  });
+
+  it.each([null, 1, 48, 8760])('принимает nullable горизонт rejected-отчёта %s', async (horizon) => {
+    const fetcher = vi.fn(async () => jsonResponse({ ...validReport, status: 'rejected',
+      reason_code: 'configuration_invalid', test_metrics: null, horizon_hours: horizon }));
+    expect(await fetchModelEvaluation(fetcher)).toMatchObject({
+      status: 'ready', evaluation: { horizonHours: horizon, testMetrics: null },
+    });
+  });
   it('разбирает полный строго заданный контракт отчёта', async () => {
     const fetcher = vi.fn(async () => jsonResponse(validReport));
 
@@ -64,6 +81,7 @@ describe('fetchModelEvaluation', () => {
         status: 'published',
         evidenceTier: 'proxy',
         labelStrategy: 'silence_horizon_proxy',
+        horizonHours: 48,
         createdAt: '2026-09-21T12:00:00+03:00',
         reasonCode: null,
         qualityThresholds: {

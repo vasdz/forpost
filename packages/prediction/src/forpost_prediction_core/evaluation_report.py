@@ -12,6 +12,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationErro
 MAX_EVALUATION_REPORT_BYTES = 256 * 1024
 UnitMetric = Annotated[float, Field(strict=True, ge=0, le=1, allow_inf_nan=False)]
 EvaluationVersion = Annotated[str, Field(pattern=r"^v[1-9][0-9]*$", max_length=32)]
+EvaluationHorizonHours = Annotated[int, Field(strict=True, gt=0, le=8760)]
 ReasonCode = Literal[
     "configuration_invalid",
     "source_unavailable",
@@ -66,6 +67,7 @@ class EvaluationReport(ExactModel):
     status: Literal["rejected", "published"]
     evidence_tier: Literal["proxy"]
     label_strategy: Literal["silence_horizon_proxy"]
+    horizon_hours: EvaluationHorizonHours | None
     created_at: AwareDatetime
     reason_code: ReasonCode | None
     quality_thresholds: QualityThresholds | None
@@ -94,6 +96,7 @@ class EvaluationReport(ExactModel):
         elif self.reason_code is not None or any(
             value is None
             for value in (
+                self.horizon_hours,
                 self.quality_thresholds,
                 self.split_sizes,
                 self.baseline_validation_pr_auc,

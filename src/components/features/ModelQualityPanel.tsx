@@ -1,9 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/Badge';
+import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { fetchModelEvaluation, type ModelEvaluation, type ModelEvaluationFeed, type ModelMetrics, type QualityThresholds, type SplitSizes } from '@/data/modelEvaluationClient';
+import { startDemoSession } from '@/data/operationsClient';
 
 const reasonLabels = {
   configuration_invalid: 'Конфигурация недействительна',
@@ -25,14 +27,42 @@ const metricRows: ReadonlyArray<{ key: keyof ModelMetrics; label: string; value:
 
 export function ModelQualityPanel() {
   const [feed, setFeed] = useState<ModelEvaluationFeed | null>(null);
+  const [signingIn, setSigningIn] = useState(false);
+  const [signInFailed, setSignInFailed] = useState(false);
+  const demoDescriptionId = useId();
+  const mounted = useRef(false);
 
   useEffect(() => {
+    mounted.current = true;
     let active = true;
     void fetchModelEvaluation().then((result) => { if (active) setFeed(result); });
-    return () => { active = false; };
+    return () => { active = false; mounted.current = false; };
   }, []);
 
+  async function signIn() {
+    if (signingIn) return;
+    setSigningIn(true);
+    setSignInFailed(false);
+    try {
+      await startDemoSession('central-dispatcher');
+      if (!mounted.current) return;
+      const result = await fetchModelEvaluation();
+      if (mounted.current) setFeed(result);
+    } catch {
+      if (mounted.current) setSignInFailed(true);
+    } finally {
+      if (mounted.current) setSigningIn(false);
+    }
+  }
+
   if (feed === null) return <Card aria-live="polite"><p role="status">Загрузка отчёта об оценке модели…</p></Card>;
+  if (feed.status === 'unauthenticated') return <Card>
+    <h2 className="font-heading text-lg font-semibold">Для просмотра качества модели требуется вход</h2>
+    <p id={demoDescriptionId} className="mt-2 text-sm leading-6 text-[var(--color-text-muted)]">Локальная демо-сессия диспетчера ОДС не является корпоративной авторизацией. Доступ действует только на настроенном демонстрационном стенде.</p>
+    <Button className="mt-4" variant="secondary" aria-describedby={demoDescriptionId} disabled={signingIn} onClick={() => void signIn()}>Войти в демо-режим ОДС</Button>
+    {signingIn && <p role="status" className="mt-2 text-sm">Выполняется вход и загрузка отчёта…</p>}
+    {signInFailed && <p role="alert" className="mt-2 text-sm">Не удалось войти в демо-режим. Проверьте настройку локального стенда и повторите попытку.</p>}
+  </Card>;
   if (feed.status === 'unavailable') return <Card aria-live="polite"><h2 className="font-heading text-lg font-semibold">Отчёт об оценке недоступен</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-muted)]">Отчёт не загружен или не прошёл проверку контракта. Прогнозы по этому сообщению не формируются.</p></Card>;
 
   return <EvaluationDetails evaluation={feed.evaluation} />;
@@ -56,6 +86,7 @@ function EvaluationDetails({ evaluation }: { evaluation: ModelEvaluation }) {
       <dl className="mt-5 grid gap-4 border-t border-[var(--color-border)] pt-5 text-sm sm:grid-cols-2 lg:grid-cols-4">
         <Detail label="Версия" value={evaluation.version} telemetry />
         <Detail label="Стратегия метки" value="Прокси тишины на горизонте" />
+        <Detail label="Горизонт оценки" value={evaluation.horizonHours === null ? 'Не определён' : `${evaluation.horizonHours} ч`} telemetry />
         <Detail label="Время отчёта" value={formatDate(evaluation.createdAt)} />
         <Detail label="Базовый PR-AUC валидации" value={formatNumber(evaluation.baselineValidationPrAuc)} telemetry />
       </dl>
