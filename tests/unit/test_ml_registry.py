@@ -158,6 +158,14 @@ def test_release_rejects_prediction_task_mismatch_before_creating_version(
     assert not (tmp_path / "sensor_failure" / "v1").exists()
 
 
+def test_native_candidate_publication_is_blocked_until_native_registry_support(tmp_path):
+    from forpost_prediction_core.candidates import NativeBoosterClassifier
+
+    with pytest.raises(ModelUnavailableError):
+        publish_model_bundle(tmp_path, NativeBoosterClassifier("catboost"), _model_card())
+    assert not (tmp_path / "sensor_failure" / "v1").exists()
+
+
 def test_trained_champion_roundtrips_through_secure_registry(tmp_path: Path) -> None:
     rows = []
     for day in range(100):
@@ -178,6 +186,7 @@ def test_trained_champion_roundtrips_through_secure_registry(tmp_path: Path) -> 
         time_column="prediction_at",
         config=TrainingConfig(
             purge_hours=0,
+            validation_points_per_fold=8,
             thresholds=(0.3, 0.5, 0.7),
             minimum_precision=0.5,
             minimum_recall=0.5,

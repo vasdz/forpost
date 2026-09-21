@@ -8,6 +8,8 @@ dependencies = [
     "pandas>=2.2.0,<4.0.0",
     "scikit-learn==1.9.1",
     "skops==0.15.0",
+    "catboost==1.2.10",
+    "lightgbm==4.7.0",
     "PyYAML>=6.0,<7"
 ]
 

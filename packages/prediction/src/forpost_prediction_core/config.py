@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from forpost_prediction_core.training import TrainingConfig
+from forpost_prediction_core.training import ProfileConstraints, TrainingConfig
 
 
 @dataclass(frozen=True)
@@ -52,11 +52,32 @@ def load_ml_config(path: Path) -> MlConfig:
         "maximum_expected_calibration_error",
         "maximum_brier_score",
         "minimum_baseline_pr_auc_delta",
+        "minimum_validation_folds",
+        "validation_points_per_fold",
+        "operating_profiles",
     }
     if not isinstance(payload, dict) or set(payload) != required:
         raise ValueError("ML-конфиг не соответствует фиксированной схеме")
     if payload["label_strategy"] != "silence_horizon_proxy":
         raise ValueError("Неутверждённая стратегия proxy-разметки")
+    for key in ("minimum_validation_folds", "validation_points_per_fold"):
+        if type(payload[key]) is not int:
+            raise ValueError("Параметры rolling folds должны быть целыми числами")
+    profiles = payload["operating_profiles"]
+    if not isinstance(profiles, dict) or set(profiles) != {
+        "high_precision",
+        "balanced",
+        "high_recall",
+    }:
+        raise ValueError("Неизвестная схема рабочих профилей")
+    constraints = {"minimum_precision", "minimum_recall", "maximum_alert_rate"}
+    if any(
+        not isinstance(profile, dict)
+        or set(profile) != constraints
+        or any(type(value) not in (int, float) for value in profile.values())
+        for profile in profiles.values()
+    ):
+        raise ValueError("Некорректные ограничения рабочих профилей")
     training = TrainingConfig(
         seed=int(payload["seed"]),
         validation_fraction=float(payload["validation_fraction"]),
@@ -72,6 +93,11 @@ def load_ml_config(path: Path) -> MlConfig:
         maximum_expected_calibration_error=float(payload["maximum_expected_calibration_error"]),
         maximum_brier_score=float(payload["maximum_brier_score"]),
         minimum_baseline_pr_auc_delta=float(payload["minimum_baseline_pr_auc_delta"]),
+        minimum_validation_folds=payload["minimum_validation_folds"],
+        validation_points_per_fold=payload["validation_points_per_fold"],
+        operating_profiles=tuple(
+            ProfileConstraints(name=name, **profile) for name, profile in profiles.items()
+        ),
     )
     horizon = int(payload["horizon_hours"])
     if horizon < 24 or training.purge_hours < horizon:

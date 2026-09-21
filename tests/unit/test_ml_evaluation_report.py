@@ -212,8 +212,8 @@ def test_validation_rejection_records_evidence_without_evaluating_test(monkeypat
             evidence=evidence,
         )
     assert evidence.stage == "validation"
-    assert evidence.split_sizes == {"fit": 152, "calibration": 40, "validation": 64, "test": 64}
-    assert evidence.baseline_validation_pr_auc == 0.25
+    assert evidence.split_sizes == {"fit": 192, "calibration": 48, "validation": 48, "test": 64}
+    assert evidence.baseline_validation_pr_auc == 15 / 48
     assert evidence.validation_metrics is None
     assert not hasattr(evidence, "test_metrics")
 
@@ -319,10 +319,9 @@ def test_command_rejects_validation_without_release_or_test_evidence(command, re
     assert report.status == "rejected"
     assert report.reason_code == "validation_rejected"
     assert report.horizon_hours == 48
-    # В оставшихся 56 строках validation — 13 положительных proxy-меток.
-    assert report.baseline_validation_pr_auc == pytest.approx(13 / 56)
-    # Из 16 дней validation два дня удалены embargo перед test.
-    assert report.split_sizes.validation == 56
+    # В трёх validation folds по 16 строк — суммарно 13 положительных proxy-меток.
+    assert report.baseline_validation_pr_auc == pytest.approx(13 / 48)
+    assert report.split_sizes.validation == 48
     assert report.test_metrics is None
     assert not arguments.registry_root.exists()
 
@@ -472,11 +471,11 @@ def test_invalid_version_replaces_stale_report_before_loading_data(
 def test_invalid_config_threshold_replaces_stale_report_before_loading_data(
     command, reports, monkeypatch, capsys, field, value
 ):
-    from dataclasses import replace
 
     module, arguments, config = command
     arguments.version = "v2"
-    config.training = replace(config.training, **{field: value})
+    # Имитируем некорректный ответ загрузчика, обходя проверяемый им dataclass.
+    config.training = SimpleNamespace(**(vars(config.training) | {field: value}))
     reports.write_evaluation_report(
         arguments.evaluation_report,
         reports.EvaluationReport.model_validate(report_payload("published")),

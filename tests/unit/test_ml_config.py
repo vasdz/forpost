@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from forpost_prediction_core.config import load_ml_config
 
 
@@ -30,3 +31,25 @@ def test_malformed_yaml_is_translated_to_safe_controlled_error(tmp_path, content
     assert "private" not in str(error.value)
     assert "secret.xlsx" not in str(error.value)
     assert error.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    "change", ["fold_type", "too_few", "unknown_profile", "unknown_constraint", "balanced_mismatch"]
+)
+def test_config_rejects_invalid_fold_and_profile_policy(tmp_path, change):
+    root = Path(__file__).resolve().parents[2]
+    payload = yaml.safe_load((root / "ml" / "config.yaml").read_text(encoding="utf-8"))
+    if change == "fold_type":
+        payload["minimum_validation_folds"] = "3"
+    elif change == "too_few":
+        payload["minimum_validation_folds"] = 2
+    elif change == "unknown_profile":
+        payload["operating_profiles"]["test_selected"] = payload["operating_profiles"]["balanced"]
+    elif change == "unknown_constraint":
+        payload["operating_profiles"]["balanced"]["test_threshold"] = 0.5
+    else:
+        payload["operating_profiles"]["balanced"]["minimum_precision"] = 0.1
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_ml_config(path)

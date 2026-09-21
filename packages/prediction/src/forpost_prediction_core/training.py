@@ -2,29 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.compose import ColumnTransformer
-from sklearn.dummy import DummyClassifier
-from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier
 from sklearn.frozen import FrozenEstimator
-from sklearn.impute import SimpleImputer
 from sklearn.inspection import permutation_importance
-from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+from forpost_prediction_core.candidates import (
+    CANDIDATE_COMPLEXITY,
+    build_candidate_estimators,
+    candidate_model_format,
+)
 from forpost_prediction_core.evaluation import (
     BinaryMetrics,
     EvaluationUnavailableError,
     evaluate_binary_probabilities,
     select_operating_threshold,
 )
-from forpost_prediction_core.splits import split_by_time
+from forpost_prediction_core.splits import make_rolling_origin_folds
 
 
 class TrainingUnavailableError(ValueError):
@@ -44,6 +42,14 @@ class TrainingEvidence:
 
 
 @dataclass(frozen=True)
+class ProfileConstraints:
+    name: str
+    minimum_precision: float
+    minimum_recall: float
+    maximum_alert_rate: float
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     seed: int = 20260915
     validation_fraction: float = 0.2
@@ -59,6 +65,87 @@ class TrainingConfig:
     maximum_expected_calibration_error: float = 0.2
     maximum_brier_score: float = 0.25
     minimum_baseline_pr_auc_delta: float = 0.01
+    minimum_validation_folds: int = 3
+    validation_points_per_fold: int = 4
+    operating_profiles: tuple[ProfileConstraints, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.minimum_validation_folds) is not int
+            or self.minimum_validation_folds < 3
+            or type(self.validation_points_per_fold) is not int
+            or self.validation_points_per_fold < 1
+        ):
+            raise ValueError("Нужны минимум три rolling folds с целыми временными точками")
+        if not self.thresholds or any(not 0 < value < 1 for value in self.thresholds):
+            raise ValueError("Пороги должны находиться строго между 0 и 1")
+        if {profile.name for profile in self.profiles} != {
+            "high_precision",
+            "balanced",
+            "high_recall",
+        } or len(self.profiles) != 3:
+            raise ValueError("Требуются три именованных рабочих профиля")
+        for profile in self.profiles:
+            if (
+                not 0 <= profile.minimum_precision <= 1
+                or not 0 <= profile.minimum_recall <= 1
+                or not 0 < profile.maximum_alert_rate <= 1
+            ):
+                raise ValueError("Некорректные ограничения рабочего профиля")
+        balanced = next(profile for profile in self.profiles if profile.name == "balanced")
+        if (balanced.minimum_precision, balanced.minimum_recall, balanced.maximum_alert_rate) != (
+            self.minimum_precision,
+            self.minimum_recall,
+            self.maximum_alert_rate,
+        ):
+            raise ValueError("Профиль balanced должен совпадать с общим quality gate")
+
+    @property
+    def profiles(self) -> tuple[ProfileConstraints, ...]:
+        if self.operating_profiles is not None:
+            return self.operating_profiles
+        return (
+            ProfileConstraints(
+                "high_precision",
+                max(0.85, self.minimum_precision),
+                self.minimum_recall,
+                self.maximum_alert_rate,
+            ),
+            ProfileConstraints(
+                "balanced", self.minimum_precision, self.minimum_recall, self.maximum_alert_rate
+            ),
+            ProfileConstraints(
+                "high_recall",
+                self.minimum_precision,
+                max(0.75, self.minimum_recall),
+                self.maximum_alert_rate,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class FoldMetrics:
+    fold_index: int
+    threshold: float
+    metrics: BinaryMetrics
+    baseline_pr_auc: float = 0.0
+
+
+@dataclass(frozen=True)
+class FoldPredictions:
+    """Только out-of-time validation-прогнозы; test не передаётся селекторам."""
+
+    fold_index: int
+    labels: np.ndarray
+    probabilities: np.ndarray
+    baseline_pr_auc: float
+
+
+@dataclass(frozen=True)
+class OperatingProfile:
+    name: str
+    threshold: float
+    rolling_folds: tuple[FoldMetrics, ...]
 
 
 @dataclass(frozen=True)
@@ -66,6 +153,7 @@ class CandidateValidation:
     name: str
     threshold: float
     metrics: BinaryMetrics
+    rolling_folds: tuple[FoldMetrics, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -82,6 +170,10 @@ class TrainingResult:
     feature_columns: tuple[str, ...]
     feature_importances: dict[str, float]
     baseline_validation_pr_auc: float
+    rolling_folds: tuple[FoldMetrics, ...]
+    operating_profiles: dict[str, OperatingProfile]
+    model_format: str
+    default_profile: str = "balanced"
 
 
 def rank_candidates(
@@ -132,6 +224,187 @@ def rank_candidates(
     )
 
 
+def split_development_and_test(
+    frame: pd.DataFrame,
+    time_column: str,
+    *,
+    test_fraction: float,
+    purge_hours: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Изолирует финальный период до любого чтения целевых меток."""
+    if time_column not in frame or not 0 < test_fraction < 1 or purge_hours < 0:
+        raise TrainingUnavailableError("Некорректные параметры финального temporal split")
+    ordered = frame.copy()
+    ordered[time_column] = pd.to_datetime(ordered[time_column])
+    if ordered[time_column].isna().any():
+        raise TrainingUnavailableError("Набор содержит неизвестные временные точки")
+    ordered = ordered.sort_values(time_column, kind="stable")
+    points = ordered[time_column].drop_duplicates().reset_index(drop=True)
+    boundary_index = int(len(points) * (1 - test_fraction))
+    if not 0 < boundary_index < len(points):
+        raise TrainingUnavailableError("Недостаточно временных точек для final test")
+    boundary = points.iloc[boundary_index]
+    development = ordered.loc[ordered[time_column] < boundary - pd.Timedelta(hours=purge_hours)]
+    test = ordered.loc[ordered[time_column] >= boundary]
+    if development.empty or test.empty:
+        raise TrainingUnavailableError("Embargo оставляет пустую часть final test split")
+    return development.reset_index(drop=True), test.reset_index(drop=True)
+
+
+def _passes(metrics: BinaryMetrics, config: TrainingConfig, baseline: float) -> bool:
+    values = [getattr(metrics, field.name) for field in fields(BinaryMetrics)]
+    return bool(
+        np.isfinite(values).all()
+        and np.isfinite(baseline)
+        and metrics.precision > config.minimum_precision
+        and metrics.recall > config.minimum_recall
+        and metrics.alert_rate <= config.maximum_alert_rate
+        and metrics.expected_calibration_error <= config.maximum_expected_calibration_error
+        and metrics.brier_score <= config.maximum_brier_score
+        and metrics.pr_auc > baseline + config.minimum_baseline_pr_auc_delta
+    )
+
+
+def _mean_metrics(folds: tuple[FoldMetrics, ...]) -> BinaryMetrics:
+    counts = {"true_positive", "false_positive", "false_negative", "true_negative"}
+    return BinaryMetrics(
+        **{
+            field.name: (
+                sum(getattr(fold.metrics, field.name) for fold in folds)
+                if field.name in counts
+                else float(np.mean([getattr(fold.metrics, field.name) for fold in folds]))
+            )
+            for field in fields(BinaryMetrics)
+        }
+    )
+
+
+def _complexity(name: str) -> tuple[int, int, str]:
+    base = name.removesuffix("_sigmoid").removesuffix("_isotonic")
+    return CANDIDATE_COMPLEXITY.get(base, 99), int(name.endswith("_isotonic")), name
+
+
+def rank_fold_candidates(
+    results: dict[str, tuple[FoldMetrics, ...]], config: TrainingConfig
+) -> CandidateValidation:
+    """Сначала worst-fold F1 и mean PR-AUC; при paired-SE ничьей проще модель."""
+    eligible = {
+        name: folds
+        for name, folds in results.items()
+        if len(folds) == config.minimum_validation_folds
+        and tuple(fold.fold_index for fold in folds) == tuple(range(1, len(folds) + 1))
+        and len({fold.threshold for fold in folds}) == 1
+        and all(
+            0 < fold.threshold < 1 and _passes(fold.metrics, config, fold.baseline_pr_auc)
+            for fold in folds
+        )
+    }
+    if not eligible:
+        raise TrainingUnavailableError("Ни один кандидат не прошёл все rolling-origin folds")
+    best = max(
+        sorted(eligible),
+        key=lambda name: (
+            min(fold.metrics.f1 for fold in eligible[name]),
+            float(np.mean([fold.metrics.pr_auc for fold in eligible[name]])),
+        ),
+    )
+    best_folds = eligible[best]
+    tied = []
+    for name, folds in eligible.items():
+        f1_delta = np.array(
+            [
+                left.metrics.f1 - right.metrics.f1
+                for left, right in zip(best_folds, folds, strict=True)
+            ]
+        )
+        auc_delta = np.array(
+            [
+                left.metrics.pr_auc - right.metrics.pr_auc
+                for left, right in zip(best_folds, folds, strict=True)
+            ]
+        )
+        f1_se = float(np.std(f1_delta, ddof=1) / np.sqrt(len(folds)))
+        auc_se = float(np.std(auc_delta, ddof=1) / np.sqrt(len(folds)))
+        worst_gap = min(fold.metrics.f1 for fold in best_folds) - min(
+            fold.metrics.f1 for fold in folds
+        )
+        if worst_gap <= f1_se + 1e-12 and abs(float(auc_delta.mean())) <= auc_se + 1e-12:
+            tied.append(name)
+    name = min(tied, key=_complexity)
+    folds = eligible[name]
+    return CandidateValidation(name, folds[0].threshold, _mean_metrics(folds), folds)
+
+
+def select_fold_operating_profiles(
+    predictions: tuple[FoldPredictions, ...], config: TrainingConfig
+) -> dict[str, OperatingProfile]:
+    """Каждый единый порог одобряется во всех validation folds, без медианного суррогата."""
+    if len(predictions) != config.minimum_validation_folds or tuple(
+        item.fold_index for item in predictions
+    ) != tuple(range(1, len(predictions) + 1)):
+        raise TrainingUnavailableError("Неполные rolling-origin доказательства")
+    candidates = set(config.thresholds)
+    prepared = []
+    for item in predictions:
+        metrics = evaluate_binary_probabilities(item.labels, item.probabilities, threshold=0.5)
+        candidates.update(float(value) for value in item.probabilities if 0 < value < 1)
+        positives = np.sort(item.probabilities[item.labels == 1])
+        negatives = np.sort(item.probabilities[item.labels == 0])
+        prepared.append((item, metrics, positives, negatives))
+    selected: dict[str, OperatingProfile] = {}
+    scores: dict[str, tuple[float, float, float, float]] = {}
+    for threshold in sorted(candidates):
+        folds = []
+        for item, base, positives, negatives in prepared:
+            tp = len(positives) - int(np.searchsorted(positives, threshold, side="left"))
+            fp = len(negatives) - int(np.searchsorted(negatives, threshold, side="left"))
+            fn, tn = len(positives) - tp, len(negatives) - fp
+            precision = tp / (tp + fp) if tp + fp else 0.0
+            recall = tp / len(positives)
+            metrics = replace(
+                base,
+                precision=precision,
+                recall=recall,
+                f1=2 * tp / (2 * tp + fp + fn),
+                alert_rate=(tp + fp) / len(item.labels),
+                true_positive=tp,
+                false_positive=fp,
+                false_negative=fn,
+                true_negative=tn,
+            )
+            folds.append(FoldMetrics(item.fold_index, threshold, metrics, item.baseline_pr_auc))
+        frozen_folds = tuple(folds)
+        for profile in config.profiles:
+            if not all(
+                _passes(fold.metrics, config, fold.baseline_pr_auc)
+                and fold.metrics.precision > profile.minimum_precision
+                and fold.metrics.recall > profile.minimum_recall
+                and fold.metrics.alert_rate <= profile.maximum_alert_rate
+                for fold in folds
+            ):
+                continue
+            # Профили отличаются целевой метрикой, но каждый сохраняет общий quality gate.
+            target = (
+                "precision"
+                if profile.name == "high_precision"
+                else "recall"
+                if profile.name == "high_recall"
+                else "f1"
+            )
+            score = (
+                min(getattr(fold.metrics, target) for fold in folds),
+                min(fold.metrics.f1 for fold in folds),
+                float(np.mean([fold.metrics.f1 for fold in folds])),
+                threshold,
+            )
+            if profile.name not in scores or score > scores[profile.name]:
+                scores[profile.name] = score
+                selected[profile.name] = OperatingProfile(profile.name, threshold, frozen_folds)
+    if len(selected) != 3:
+        raise TrainingUnavailableError("Не все рабочие профили прошли каждый validation fold")
+    return selected
+
+
 def train_champion(
     frame: pd.DataFrame,
     *,
@@ -140,7 +413,7 @@ def train_champion(
     config: TrainingConfig | None = None,
     evidence: TrainingEvidence | None = None,
 ) -> TrainingResult:
-    """Обучает кандидатов, выбирает их по validation и один раз оценивает test."""
+    """Изолирует test, замораживает выбор по rolling folds, затем оценивает test."""
     if evidence is not None:
         evidence.stage = "training"
         evidence.split_sizes = None
@@ -149,112 +422,150 @@ def train_champion(
         evidence.threshold = None
         evidence.champion_name = None
     settings = config or TrainingConfig()
-    _validate_training_frame(frame, label_column, time_column, settings)
-    split = split_by_time(
+    development, test = split_development_and_test(
         frame,
         time_column,
-        validation_fraction=settings.validation_fraction,
         test_fraction=settings.test_fraction,
         purge_hours=settings.purge_hours,
     )
+    _validate_training_frame(development, label_column, time_column, settings)
     excluded = {label_column, time_column, "object_id"}
     feature_columns = tuple(column for column in frame.columns if column not in excluded)
     if not feature_columns:
         raise TrainingUnavailableError("В наборе отсутствуют допустимые признаки")
 
+    try:
+        folds = make_rolling_origin_folds(
+            development,
+            time_column,
+            fold_count=settings.minimum_validation_folds,
+            validation_points=settings.validation_points_per_fold,
+            purge_hours=settings.purge_hours,
+        )
+    except ValueError:
+        raise TrainingUnavailableError(
+            "Недостаточно временных точек для rolling-origin проверки"
+        ) from None
+    predictions: dict[str, list[FoldPredictions]] = {}
+    last_models: dict[str, Any] = {}
+    baseline_scores: list[float] = []
+    for fold in folds:
+        fit, calibration = _split_fit_calibration(
+            fold.train,
+            time_column,
+            calibration_fraction=settings.calibration_fraction,
+            purge_hours=settings.purge_hours,
+        )
+        for partition, values in (
+            ("fit", fit),
+            ("calibration", calibration),
+            ("validation", fold.validation),
+        ):
+            _require_partition_support(values[label_column].to_numpy(), partition, settings)
+        fit_x, calibration_x = fit.loc[:, feature_columns], calibration.loc[:, feature_columns]
+        validation_x = fold.validation.loc[:, feature_columns]
+        validation_y = fold.validation[label_column].to_numpy(dtype=np.int8)
+        baseline_score = evaluate_binary_probabilities(
+            validation_y,
+            np.full(len(validation_y), fit[label_column].mean()),
+            threshold=0.5,
+        ).pr_auc
+        baseline_scores.append(baseline_score)
+        if evidence is not None:
+            evidence.split_sizes = {
+                "fit": len(fit),
+                "calibration": len(calibration),
+                "validation": sum(len(item.validation) for item in folds),
+                "test": len(test),
+            }
+            evidence.baseline_validation_pr_auc = float(np.mean(baseline_scores))
+        for name, estimator in build_candidate_estimators(fit_x, settings.seed).items():
+            estimator.fit(fit_x, fit[label_column].to_numpy(dtype=np.int8))
+            for method in ("isotonic", "sigmoid"):
+                calibrated = _calibrate(estimator, calibration_x, calibration[label_column], method)
+                candidate_name = f"{name}_{method}"
+                predictions.setdefault(candidate_name, []).append(
+                    FoldPredictions(
+                        fold.index,
+                        validation_y,
+                        calibrated.predict_proba(validation_x)[:, 1],
+                        baseline_score,
+                    )
+                )
+                if fold is folds[-1]:
+                    last_models[candidate_name] = calibrated
+
+    if evidence is not None:
+        evidence.stage = "validation"
+    profiles_by_candidate: dict[str, dict[str, OperatingProfile]] = {}
+    for name, values in predictions.items():
+        try:
+            profiles_by_candidate[name] = select_fold_operating_profiles(tuple(values), settings)
+        except TrainingUnavailableError:
+            continue
+    champion = rank_fold_candidates(
+        {
+            name: profiles["balanced"].rolling_folds
+            for name, profiles in profiles_by_candidate.items()
+        },
+        settings,
+    )
+    # Importance использует ещё не переобученную модель последнего fold.
+    importance = permutation_importance(
+        last_models[champion.name],
+        folds[-1].validation.loc[:, feature_columns],
+        folds[-1].validation[label_column].to_numpy(dtype=np.int8),
+        scoring="average_precision",
+        n_repeats=3,
+        random_state=settings.seed,
+        n_jobs=1,
+    )
     fit, calibration = _split_fit_calibration(
-        split.train,
+        development,
         time_column,
         calibration_fraction=settings.calibration_fraction,
         purge_hours=settings.purge_hours,
     )
-    fit_x = fit.loc[:, feature_columns]
-    calibration_x = calibration.loc[:, feature_columns]
-    validation_x = split.validation.loc[:, feature_columns]
-    test_x = split.test.loc[:, feature_columns]
-    fit_y = fit[label_column].to_numpy(dtype=np.int8)
-    calibration_y = calibration[label_column].to_numpy(dtype=np.int8)
-    validation_y = split.validation[label_column].to_numpy(dtype=np.int8)
-    test_y = split.test[label_column].to_numpy(dtype=np.int8)
-    _require_partition_support(fit_y, "fit", settings)
-    _require_partition_support(calibration_y, "calibration", settings)
-    _require_partition_support(validation_y, "validation", settings)
-    _require_partition_support(test_y, "test", settings)
-
-    if evidence is not None:
-        evidence.split_sizes = {
-            "fit": len(fit),
-            "calibration": len(calibration),
-            "validation": len(split.validation),
-            "test": len(split.test),
-        }
-
-    fitted: dict[str, Any] = {}
-    validation_probabilities: dict[str, np.ndarray] = {}
-    estimators = _candidate_estimators(fit_x, settings.seed)
-    baseline = estimators.pop("dummy_prior")
-    baseline.fit(fit_x, fit_y)
-    baseline_probabilities = baseline.predict_proba(validation_x)[:, 1]
-    baseline_metrics = evaluate_binary_probabilities(
-        validation_y,
-        baseline_probabilities,
-        threshold=max(settings.thresholds),
-    )
-    if evidence is not None:
-        evidence.baseline_validation_pr_auc = baseline_metrics.pr_auc
-    for name, estimator in estimators.items():
-        estimator.fit(fit_x, fit_y)
-        for calibration_method in ("isotonic", "sigmoid"):
-            calibrated = CalibratedClassifierCV(
-                FrozenEstimator(estimator),
-                method=calibration_method,
-                ensemble=False,
-            )
-            calibrated.fit(calibration_x, calibration_y)
-            candidate_name = f"{name}_{calibration_method}"
-            fitted[candidate_name] = calibrated
-            validation_probabilities[candidate_name] = calibrated.predict_proba(validation_x)[:, 1]
-
-    if evidence is not None:
-        evidence.stage = "validation"
-    champion = rank_candidates(
-        validation_y,
-        validation_probabilities,
-        settings,
-        baseline_pr_auc=baseline_metrics.pr_auc,
+    _require_partition_support(fit[label_column].to_numpy(), "fit", settings)
+    _require_partition_support(calibration[label_column].to_numpy(), "calibration", settings)
+    name, method = champion.name.rsplit("_", 1)
+    estimator = build_candidate_estimators(fit.loc[:, feature_columns], settings.seed)[name]
+    estimator.fit(fit.loc[:, feature_columns], fit[label_column].to_numpy(dtype=np.int8))
+    champion_model = _calibrate(
+        estimator, calibration.loc[:, feature_columns], calibration[label_column], method
     )
     if evidence is not None:
         evidence.validation_metrics = champion.metrics
         evidence.threshold = champion.threshold
         evidence.champion_name = champion.name
         evidence.stage = "test"
-    champion_model = fitted[champion.name]
+        evidence.split_sizes = {
+            "fit": len(fit),
+            "calibration": len(calibration),
+            "validation": sum(len(item.validation) for item in folds),
+            "test": len(test),
+        }
+    _validate_training_frame(test, label_column, time_column, settings)
+    test_x = test.loc[:, feature_columns]
+    test_y = test[label_column].to_numpy(dtype=np.int8)
+    _require_partition_support(test_y, "test", settings)
     test_probabilities = champion_model.predict_proba(test_x)[:, 1]
     test_metrics = evaluate_binary_probabilities(
         test_y, test_probabilities, threshold=champion.threshold
     )
     baseline_test_metrics = evaluate_binary_probabilities(
         test_y,
-        baseline.predict_proba(test_x)[:, 1],
+        np.full(len(test_y), fit[label_column].mean()),
         threshold=max(settings.thresholds),
     )
     _require_quality_gate(test_metrics, settings, baseline_test_metrics.pr_auc)
-    importance = permutation_importance(
-        champion_model,
-        validation_x,
-        validation_y,
-        scoring="average_precision",
-        n_repeats=3,
-        random_state=settings.seed,
-        n_jobs=1,
-    )
     return TrainingResult(
         champion_name=champion.name,
         threshold=champion.threshold,
         validation_metrics=champion.metrics,
         test_metrics=test_metrics,
-        validation_row_count=len(split.validation),
-        test_row_count=len(split.test),
+        validation_row_count=sum(len(item.validation) for item in folds),
+        test_row_count=len(test),
         fit_row_count=len(fit),
         calibration_row_count=len(calibration),
         model=champion_model,
@@ -263,80 +574,16 @@ def train_champion(
             name: float(value)
             for name, value in zip(feature_columns, importance.importances_mean, strict=True)
         },
-        baseline_validation_pr_auc=baseline_metrics.pr_auc,
+        baseline_validation_pr_auc=float(np.mean(baseline_scores)),
+        rolling_folds=champion.rolling_folds,
+        operating_profiles=profiles_by_candidate[champion.name],
+        model_format=candidate_model_format(champion.name),
     )
 
 
-def _candidate_estimators(frame: pd.DataFrame, seed: int) -> dict[str, Any]:
-    numeric_columns = tuple(frame.select_dtypes(include=["number", "bool"]).columns)
-    categorical_columns = tuple(column for column in frame.columns if column not in numeric_columns)
-
-    def preprocessing() -> ColumnTransformer:
-        return ColumnTransformer(
-            [
-                (
-                    "numeric",
-                    Pipeline(
-                        [
-                            ("imputer", SimpleImputer(strategy="median")),
-                            ("scale", StandardScaler()),
-                        ]
-                    ),
-                    numeric_columns,
-                ),
-                (
-                    "categorical",
-                    Pipeline(
-                        [
-                            ("imputer", SimpleImputer(strategy="most_frequent")),
-                            (
-                                "one_hot",
-                                OneHotEncoder(handle_unknown="ignore", sparse_output=False),
-                            ),
-                        ]
-                    ),
-                    categorical_columns,
-                ),
-            ],
-            remainder="drop",
-        )
-
-    def pipeline(classifier: Any) -> Pipeline:
-        return Pipeline([("preprocess", preprocessing()), ("classifier", classifier)])
-
-    return {
-        "dummy_prior": Pipeline(
-            [
-                ("preprocess", preprocessing()),
-                ("classifier", DummyClassifier(strategy="prior")),
-            ]
-        ),
-        "extra_trees": pipeline(
-            ExtraTreesClassifier(
-                n_estimators=160,
-                min_samples_leaf=2,
-                class_weight="balanced",
-                random_state=seed,
-                n_jobs=1,
-            )
-        ),
-        "hist_gradient_boosting": pipeline(
-            HistGradientBoostingClassifier(
-                max_iter=120,
-                learning_rate=0.08,
-                max_leaf_nodes=15,
-                l2_regularization=0.1,
-                random_state=seed,
-            )
-        ),
-        "logistic_regression": pipeline(
-            LogisticRegression(
-                class_weight="balanced",
-                max_iter=1000,
-                random_state=seed,
-            )
-        ),
-    }
+def _calibrate(estimator: Any, features: pd.DataFrame, labels: pd.Series, method: str) -> Any:
+    calibrated = CalibratedClassifierCV(FrozenEstimator(estimator), method=method, ensemble=False)
+    return calibrated.fit(features, labels.to_numpy(dtype=np.int8))
 
 
 def _validate_training_frame(
@@ -400,12 +647,5 @@ def _split_fit_calibration(
 def _require_quality_gate(
     metrics: BinaryMetrics, config: TrainingConfig, baseline_pr_auc: float
 ) -> None:
-    if (
-        metrics.precision <= config.minimum_precision
-        or metrics.recall <= config.minimum_recall
-        or metrics.alert_rate > config.maximum_alert_rate
-        or metrics.expected_calibration_error > config.maximum_expected_calibration_error
-        or metrics.brier_score > config.maximum_brier_score
-        or metrics.pr_auc <= baseline_pr_auc + config.minimum_baseline_pr_auc_delta
-    ):
+    if not _passes(metrics, config, baseline_pr_auc):
         raise TrainingUnavailableError("Финальный temporal holdout не прошёл quality gate")
