@@ -1,6 +1,7 @@
 'use client';
 
 import { LocalSituationGate } from '@/components/features/LocalSituationState';
+import { ModelQualityPanel } from '@/components/features/ModelQualityPanel';
 import { ObservedEventTable } from '@/components/features/ObservedEventTable';
 import { PageHeader } from '@/components/features/PageHeader';
 import { PredictionPanel } from '@/components/features/PredictionCapability';
@@ -20,6 +21,7 @@ const channelColumns: TableColumn<ChannelRow>[] = [
 export default function SensorFailurePage() {
   return <><PageHeader eyebrow="Наблюдения СМВУ" title="Наблюдения по каналам датчиков" description="Фактические записи локального снимка дополнены проверенным ML-экспортом, когда модель проходит контроль качества." />
     <PredictionPanel type="sensor_failure" unavailableDescription="Валидированный экспорт модели отказа пока отсутствует." />
+    <ModelQualityPanel />
     <LocalSituationGate>{(snapshot) => <div className="mt-6 space-y-6"><section><h2 className="mb-3 font-heading text-xl font-semibold">Каналы датчиков</h2><Table ariaLabel="Каналы датчиков" columns={channelColumns} rows={snapshot.channels.map((channel) => ({ ...channel, id: channel.channelId }))} pageSize={10} /></section><section><h2 className="mb-3 font-heading text-xl font-semibold">Наблюдения датчиков</h2><ObservedEventTable events={snapshot.events} ariaLabel="Наблюдения датчиков" /></section></div>}</LocalSituationGate>
   </>;
 }

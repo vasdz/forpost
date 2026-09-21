@@ -5,6 +5,7 @@ const backend = vi.hoisted(() => ({ proxyForpostApi: vi.fn() }));
 vi.mock('@/server/forpostApi', () => backend);
 
 import { GET as getAvailability } from './availability/route';
+import { GET as getModelEvaluation } from './model-evaluation/route';
 import { GET as getPredictions } from './predictions/route';
 import { POST as postDecision } from './predictions/[predictionId]/decisions/route';
 
@@ -19,12 +20,14 @@ describe('same-origin backend routes', () => {
     );
   });
 
-  it('проксирует чтение прогнозов и доступности только на фиксированные пути', async () => {
+  it('проксирует чтение прогнозов, оценки модели и доступности только на фиксированные пути', async () => {
     await getPredictions();
+    await getModelEvaluation();
     await getAvailability();
 
     expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(1, '/api/predictions');
-    expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(2, '/api/availability');
+    expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(2, '/api/model-evaluation');
+    expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(3, '/api/availability');
   });
 
   it('не принимает решение без доверенной пользовательской сессии', async () => {
