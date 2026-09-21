@@ -117,6 +117,15 @@ def test_training_window_uses_guarded_sources_without_public_snapshot_limit(monk
     assert window.scanned_event_count == 1
 
 
+def test_weekly_feature_training_accepts_bounded_larger_tail(monkeypatch, tmp_path):
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(raw_root)
+    window = load_training_window(raw_root, max_events=3_000_000)
+    assert len(window.events) == 1
+    with pytest.raises(SourceSnapshotError):
+        load_training_window(raw_root, max_events=3_000_001)
+
+
 def test_training_window_keeps_contiguous_latest_tail_and_marks_truncation(monkeypatch, tmp_path):
     raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
     events = [

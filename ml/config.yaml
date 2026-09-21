@@ -4,7 +4,7 @@ feature_schema_version: "5"
 label_strategy: "silence_horizon_proxy"
 horizon_hours: 24
 cutoff_count: 48
-max_training_events: 2000000
+max_training_events: 3000000
 feature_windows_hours: [1, 6, 24, 72, 168]
 minimum_positive_examples: 50
 minimum_negative_examples: 50

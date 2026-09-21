@@ -23,7 +23,7 @@ RAW_DATA_ROOT: Final[Path] = PROJECT_ROOT / "data" / "raw"
 PROCESSED_DATA_ROOT: Final[Path] = PROJECT_ROOT / "data" / "processed"
 MAX_SUPPLEMENTAL_JOURNAL_BYTES: Final[int] = 32 * 1024 * 1024
 MAX_EVENTS: Final[int] = 500
-MAX_TRAINING_EVENTS: Final[int] = 2_000_000
+MAX_TRAINING_EVENTS: Final[int] = 3_000_000
 ALARM_EVENT_RESERVE: Final[int] = 100
 MAX_CSV_FILES: Final[int] = 64
 # Ограничения остаются конечными, но учитывают фактические годовые выгрузки.
