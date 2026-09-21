@@ -70,7 +70,19 @@ export function runLocalStack(argumentsList = process.argv.slice(2)) {
 
   function stopChild(child, signal) {
     if (child.exitCode === null && !child.killed) {
-      child.kill(signal);
+      if (process.platform === 'win32') {
+        // Next CLI создаёт worker: завершение одного PID оставляет сервер в фоне.
+        if (!Number.isSafeInteger(child.pid) || child.pid <= 0) return;
+        const terminator = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+          stdio: 'ignore', windowsHide: true, shell: false,
+        });
+        terminator.once('error', () => {
+          console.error('Не удалось завершить локальное дерево процессов.');
+          process.exitCode = 1;
+        });
+      } else {
+        child.kill(signal);
+      }
     }
   }
 

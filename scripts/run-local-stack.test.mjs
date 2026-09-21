@@ -24,8 +24,10 @@ function createChild() {
 
 let children;
 let originalExitCode;
+const originalPlatform = process.platform;
 
 beforeEach(() => {
+  Object.defineProperty(process, 'platform', { value: 'linux' });
   originalExitCode = process.exitCode;
   process.exitCode = undefined;
   children = [createChild(), createChild()];
@@ -36,10 +38,41 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  Object.defineProperty(process, 'platform', { value: originalPlatform });
   process.exitCode = originalExitCode;
 });
 
 describe('локальный стек', () => {
+  it('на Windows завершает принадлежащее launcher дерево через PID без shell и секрета', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    children[0].pid = 1001;
+    children[1].pid = 1002;
+    childProcess.spawn.mockImplementation(() => createChild());
+    const launches = runLocalStack([]);
+
+    process.emit('SIGTERM');
+
+    expect(launches.api.kill).not.toHaveBeenCalled();
+    expect(launches.next.kill).not.toHaveBeenCalled();
+    expect(childProcess.spawn).toHaveBeenNthCalledWith(3, 'taskkill', ['/PID', '1001', '/T', '/F'], {
+      stdio: 'ignore', windowsHide: true, shell: false,
+    });
+    expect(childProcess.spawn).toHaveBeenNthCalledWith(4, 'taskkill', ['/PID', '1002', '/T', '/F'], {
+      stdio: 'ignore', windowsHide: true, shell: false,
+    });
+    expect(process.exitCode).toBe(143);
+  });
+
+  it('на Windows завершает дерево Next после выхода API', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    children[1].pid = 2002;
+    childProcess.spawn.mockImplementation(() => createChild());
+    const launches = runLocalStack([]);
+    launches.api.emit('exit', 1, null);
+    expect(childProcess.spawn.mock.calls.filter(([command]) => command === 'taskkill')).toEqual([
+      ['taskkill', ['/PID', '2002', '/T', '/F'], { stdio: 'ignore', windowsHide: true, shell: false }],
+    ]);
+  });
   it('запускает API и Next.js только на loopback с общим service token', () => {
     const launches = getLocalStackLaunches({ PATH: process.env.PATH ?? '' });
 
