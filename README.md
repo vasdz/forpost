@@ -59,15 +59,18 @@
    & .\.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v1
    ```
 
-4. Установите frontend-зависимости и запустите UI:
+4. Установите frontend-зависимости и запустите локальный стек:
 
    ```powershell
    npm ci --ignore-scripts
-   npm run dev
+   npm run dev:stack
    ```
 
-`npm run dev` и `npm run start` запускают Next.js только на `127.0.0.1`.
-Публикация порта, reverse proxy и LAN не поддерживаются для локального снимка.
+`npm run dev:stack` запускает FastAPI на `127.0.0.1:8000` и Next.js только на
+`127.0.0.1`; им передаётся общий случайно сгенерированный service token. При
+остановке одного процесса launcher завершает второй. `npm run dev` и `npm run
+start` запускают только Next.js на `127.0.0.1`. Публикация порта, reverse proxy
+и LAN не поддерживаются для локального снимка.
 
 ## Данные и безопасность
 
