@@ -16,6 +16,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
+from forpost_prediction_core.errors import TrainingUnavailableError
+
 MODEL_FORMATS = {"catboost": "catboost_cbm", "lightgbm": "lightgbm_text"}
 CANDIDATE_COMPLEXITY = {
     "logistic_regression": 0,
@@ -40,7 +42,12 @@ class NativeBoosterClassifier(ClassifierMixin, BaseEstimator):
         values = np.asarray(X, dtype=np.float64)
         self.n_features_in_ = values.shape[1]
         if self.backend == "catboost":
-            from catboost import CatBoostClassifier
+            try:
+                from catboost import CatBoostClassifier
+            except ImportError:
+                raise TrainingUnavailableError(
+                    "Недоступна обязательная библиотека CatBoost"
+                ) from None
 
             self.native_model_ = CatBoostClassifier(
                 iterations=350,
@@ -55,7 +62,12 @@ class NativeBoosterClassifier(ClassifierMixin, BaseEstimator):
             )
             self.native_model_.fit(values, y, plot=False)
         elif self.backend == "lightgbm":
-            from lightgbm import LGBMClassifier
+            try:
+                from lightgbm import LGBMClassifier
+            except ImportError:
+                raise TrainingUnavailableError(
+                    "Недоступна обязательная библиотека LightGBM"
+                ) from None
 
             estimator = LGBMClassifier(
                 n_estimators=350,
@@ -102,14 +114,24 @@ class NativeBoosterClassifier(ClassifierMixin, BaseEstimator):
     def load_native(cls, path: Path, *, model_format: str) -> NativeBoosterClassifier:
         """Загружает проверенный registry файл только через allow-list форматов."""
         if model_format == "catboost_cbm":
-            from catboost import CatBoostClassifier
+            try:
+                from catboost import CatBoostClassifier
+            except ImportError:
+                raise TrainingUnavailableError(
+                    "Недоступна обязательная библиотека CatBoost"
+                ) from None
 
             adapter = cls("catboost")
             adapter.native_model_ = CatBoostClassifier(allow_writing_files=False, verbose=False)
             adapter.native_model_.load_model(str(path), format="cbm")
             adapter.n_features_in_ = len(adapter.native_model_.feature_names_)
         elif model_format == "lightgbm_text":
-            from lightgbm import Booster
+            try:
+                from lightgbm import Booster
+            except ImportError:
+                raise TrainingUnavailableError(
+                    "Недоступна обязательная библиотека LightGBM"
+                ) from None
 
             adapter = cls("lightgbm")
             adapter.native_model_ = Booster(model_file=str(path))

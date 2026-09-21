@@ -350,6 +350,43 @@ def test_command_replaces_stale_report_on_source_failure_without_leaking_error(
     assert "secret.xlsx" not in arguments.evaluation_report.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("backend", ["catboost", "lightgbm"])
+def test_command_replaces_stale_report_when_native_dependency_is_unavailable(
+    command, reports, monkeypatch, capsys, backend
+):
+    import builtins
+
+    module, arguments, _config = command
+    arguments.evaluation_report = (
+        arguments.evaluation_report.parent / "chosen-report" / "result.json"
+    )
+    reports.write_evaluation_report(
+        arguments.evaluation_report,
+        reports.EvaluationReport.model_validate(report_payload("published")),
+    )
+    original_import = builtins.__import__
+
+    def unavailable(name, *args, **kwargs):
+        if name == backend:
+            raise ImportError("C:/private-source/secret-native-library.dll")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", unavailable)
+    assert module.main() == 1
+    report = reports.load_evaluation_report(arguments.evaluation_report)
+    assert report.status == "rejected"
+    assert report.reason_code == "training_unavailable"
+    assert report.validation_metrics is None
+    assert report.test_metrics is None
+    assert report.champion_name is None
+    assert not arguments.registry_root.exists()
+    captured = capsys.readouterr()
+    emitted = captured.out + captured.err + arguments.evaluation_report.read_text(encoding="utf-8")
+    assert "private-source" not in emitted
+    assert "secret-native-library" not in emitted
+    assert "Traceback" not in emitted
+
+
 def test_command_late_release_failure_does_not_publish_test_evidence(
     command, reports, monkeypatch, capsys
 ):

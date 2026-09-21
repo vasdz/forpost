@@ -16,6 +16,7 @@ from forpost_prediction_core.candidates import (
     build_candidate_estimators,
     candidate_model_format,
 )
+from forpost_prediction_core.errors import TrainingUnavailableError
 from forpost_prediction_core.evaluation import (
     BinaryMetrics,
     EvaluationUnavailableError,
@@ -23,10 +24,6 @@ from forpost_prediction_core.evaluation import (
     select_operating_threshold,
 )
 from forpost_prediction_core.splits import make_rolling_origin_folds
-
-
-class TrainingUnavailableError(ValueError):
-    """Набор или кандидаты не позволяют честно опубликовать модель."""
 
 
 @dataclass
@@ -344,13 +341,22 @@ def select_fold_operating_profiles(
     ) != tuple(range(1, len(predictions) + 1)):
         raise TrainingUnavailableError("Неполные rolling-origin доказательства")
     candidates = set(config.thresholds)
+    probability_boundaries = {0.0, 1.0}
     prepared = []
     for item in predictions:
         metrics = evaluate_binary_probabilities(item.labels, item.probabilities, threshold=0.5)
         candidates.update(float(value) for value in item.probabilities if 0 < value < 1)
+        probability_boundaries.update(float(value) for value in item.probabilities)
         positives = np.sort(item.probabilities[item.labels == 1])
         negatives = np.sort(item.probabilities[item.labels == 0])
         prepared.append((item, metrics, positives, negatives))
+    # Проверяем и интервалы между scores, включая область выше последнего score < 1.
+    boundaries = sorted(probability_boundaries)
+    candidates.update(
+        midpoint
+        for lower, upper in zip(boundaries[:-1], boundaries[1:], strict=True)
+        if 0 < (midpoint := lower + (upper - lower) / 2) < 1
+    )
     selected: dict[str, OperatingProfile] = {}
     scores: dict[str, tuple[float, float, float, float]] = {}
     for threshold in sorted(candidates):

@@ -16,6 +16,36 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
 
 
+@pytest.mark.parametrize("backend", ["catboost", "lightgbm"])
+@pytest.mark.parametrize("exception_type", [ImportError, ModuleNotFoundError])
+@pytest.mark.parametrize("operation", ["fit", "load"])
+def test_native_dependency_error_is_sanitized(
+    backend, exception_type, operation, monkeypatch, tmp_path
+):
+    import builtins
+
+    from forpost_prediction_core.training import TrainingUnavailableError
+
+    original_import = builtins.__import__
+
+    def unavailable(name, *args, **kwargs):
+        if name == backend:
+            raise exception_type("C:/private-source/secret-native-library.dll")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", unavailable)
+    with pytest.raises(TrainingUnavailableError) as error:
+        if operation == "fit":
+            NativeBoosterClassifier(backend).fit(np.array([[0.0], [1.0]]), np.array([0, 1]))
+        else:
+            NativeBoosterClassifier.load_native(
+                tmp_path / "unavailable-model", model_format=candidate_model_format(backend)
+            )
+    assert "private-source" not in str(error.value)
+    assert "secret-native-library" not in str(error.value)
+    assert error.value.__suppress_context__
+
+
 @pytest.mark.parametrize(
     "name", ["logistic_regression", "extra_trees", "hist_gradient_boosting", "catboost", "lightgbm"]
 )

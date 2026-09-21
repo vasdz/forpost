@@ -130,6 +130,46 @@ def test_profiles_share_one_approved_threshold_across_all_folds():
         )
 
 
+def test_profiles_include_threshold_above_largest_interior_probability():
+    labels = np.array([1, 1, 0, 0, 0, 0, 0, 0])
+    scores = np.array([1.0, 1.0, 0.95, 0.0, 0.0, 0.0, 0.0, 0.0])
+    profiles = select_fold_operating_profiles(
+        tuple(FoldPredictions(index, labels, scores, 0.25) for index in (1, 2, 3)),
+        TrainingConfig(),
+    )
+    for profile in profiles.values():
+        assert profile.threshold == pytest.approx(0.975)
+        assert all(
+            fold.metrics.precision == 1 and fold.metrics.recall == 1
+            for fold in profile.rolling_folds
+        )
+
+
+@pytest.mark.parametrize("backend", ["catboost", "lightgbm"])
+def test_training_rejects_unavailable_native_candidate_without_fallback(backend, monkeypatch):
+    import sys
+
+    from forpost_prediction_core.training import TrainingEvidence
+
+    monkeypatch.setitem(sys.modules, backend, None)
+    evidence = TrainingEvidence()
+    with pytest.raises(TrainingUnavailableError) as error:
+        train_champion(
+            _training_frame(),
+            label_column="label",
+            time_column="cutoff",
+            config=TrainingConfig(
+                purge_hours=0, minimum_positive_examples=1, minimum_negative_examples=1
+            ),
+            evidence=evidence,
+        )
+    assert error.value.__suppress_context__
+    assert evidence.stage == "training"
+    assert evidence.champion_name is None
+    assert evidence.threshold is None
+    assert evidence.validation_metrics is None
+
+
 def test_fold_ranking_does_not_depend_on_candidate_insertion_order():
     folds = _passing_folds()
     results = {
