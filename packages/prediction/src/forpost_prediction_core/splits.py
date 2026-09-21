@@ -16,6 +16,56 @@ class TemporalSplit:
     test: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class RollingFold:
+    """Один expanding train и следующий за ним validation-интервал."""
+
+    index: int
+    train: pd.DataFrame
+    validation: pd.DataFrame
+
+
+def make_rolling_origin_folds(
+    frame: pd.DataFrame,
+    time_column: str,
+    *,
+    fold_count: int,
+    validation_points: int,
+    purge_hours: int,
+) -> tuple[RollingFold, ...]:
+    """Формирует expanding rolling-origin folds с временным эмбарго."""
+    ordered = frame.sort_values(time_column, kind="stable").reset_index(drop=True)
+    points = ordered[time_column].drop_duplicates().sort_values().reset_index(drop=True)
+    required = fold_count * validation_points + 2
+    if fold_count < 2 or validation_points < 1 or len(points) < required:
+        raise ValueError("Недостаточно временных точек для rolling-origin проверки")
+    purge = pd.Timedelta(hours=purge_hours)
+    first_validation = len(points) - fold_count * validation_points
+    folds: list[RollingFold] = []
+    for index in range(fold_count):
+        start = points.iloc[first_validation + index * validation_points]
+        stop_index = first_validation + (index + 1) * validation_points
+        stop = (
+            points.iloc[stop_index]
+            if stop_index < len(points)
+            else points.iloc[-1] + pd.Timedelta(1, "ns")
+        )
+        train = ordered.loc[ordered[time_column] < start - purge].copy()
+        validation = ordered.loc[
+            (ordered[time_column] >= start) & (ordered[time_column] < stop)
+        ].copy()
+        if train.empty or validation.empty:
+            raise ValueError("Embargo оставляет пустой rolling-origin fold")
+        folds.append(
+            RollingFold(
+                index=index + 1,
+                train=train.reset_index(drop=True),
+                validation=validation.reset_index(drop=True),
+            )
+        )
+    return tuple(folds)
+
+
 def split_by_time(
     frame: pd.DataFrame,
     time_column: str,
