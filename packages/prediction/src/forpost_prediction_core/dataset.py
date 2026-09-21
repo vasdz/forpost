@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
-from forpost_prediction_core.features import build_channel_features
+from forpost_prediction_core.features import DEFAULT_FEATURE_WINDOWS_HOURS, build_channel_features
 from forpost_prediction_core.labeling import label_silence_horizon
 from forpost_prediction_core.time_utils import normalize_event_times
 
@@ -19,7 +19,7 @@ def build_sensor_failure_dataset(
     horizon_hours: int = 24,
     cutoff_count: int = 12,
     minimum_history_events: int = 3,
-    feature_windows_hours: Sequence[int] = (1, 6, 24),
+    feature_windows_hours: Sequence[int] = DEFAULT_FEATURE_WINDOWS_HOURS,
 ) -> pd.DataFrame:
     """Строит утверждённый proxy-набор тишины без утечки событий после cutoff."""
     if horizon_hours < 1 or cutoff_count < 2 or minimum_history_events < 1:

@@ -1,5 +1,27 @@
 import pandas as pd
 from forpost_prediction_core.dataset import build_sensor_failure_dataset
+from forpost_prediction_core.features import build_channel_features
+
+
+def test_default_dataset_warms_up_weekly_features_and_matches_inference() -> None:
+    """Ловит расхождение окон schema-v5 между dataset и прямым inference."""
+    events = pd.DataFrame(
+        {
+            "channel_id": ["a"] * 49,
+            "observed_at": pd.date_range("2026-01-01", periods=49, freq="6h", tz="UTC"),
+            "sensor_value": list(range(49)),
+        }
+    )
+    channels = pd.DataFrame({"channel_id": ["a"], "engineering_system": ["source-system"]})
+    dataset = build_sensor_failure_dataset(events, channels, cutoff_count=3)
+    assert dataset["prediction_at"].min() >= events["observed_at"].min() + pd.Timedelta(days=7)
+    assert dataset["event_count_168h"].eq(28).all()
+    assert dataset["event_count_72h"].eq(12).all()
+    assert dataset["engineering_system"].eq("source-system").all()
+    feature_columns = dataset.columns.drop(["silence_label", "prediction_at", "evidence_tier"])
+    for cutoff, frame in dataset.groupby("prediction_at"):
+        expected = build_channel_features(events, channels, cutoff)
+        pd.testing.assert_frame_equal(frame[feature_columns].reset_index(drop=True), expected)
 
 
 def test_dataset_is_chronological_and_uses_only_channels_with_history():
