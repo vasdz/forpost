@@ -38,13 +38,13 @@ describe('CI perimeter gate', () => {
     });
   });
 
-  it('audits third-party Python packages without treating editable workspace packages as PyPI failures', () => {
+  it('audits the hash-pinned production dependency graph', () => {
     const { document } = loadWorkflow();
     const auditStep = document.jobs['dependency-audit'].steps.find(
       (step) => step.name === 'Audit Python dependencies',
     );
 
-    expect(auditStep.run).toContain('pip-audit --skip-editable');
-    expect(auditStep.run).not.toContain('pip-audit --strict');
+    expect(auditStep.run).toContain('pip-audit --disable-pip -r requirements-prod.lock');
+    expect(auditStep.run).not.toContain('--skip-editable');
   });
 });

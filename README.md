@@ -2,18 +2,20 @@
 
 ФОРПОСТ — веб-сервис поддержки диспетчерских решений для инженерных
 коллекторов Москвы. Платформа показывает только подтверждённые обезличенные
-наблюдения из локального снимка и не выдаёт их за прогноз, рекомендацию или
-диагноз.
+наблюдения из локального снимка и результаты проверенного ML-релиза с явным
+уровнем доказательности. Proxy прекращения телеметрии не выдаётся за
+подтверждённую поломку, рекомендацию или диагноз.
 
 ## Статус
 
-Сейчас готов защищённый платформенный контур: интерфейс Next.js, локальный
-адаптер обезличенных данных, fail-closed FastAPI, проверка Bearer-схемы,
-RBAC-модель, аудит целостности, тесты и CI-гейты. Реальные прогнозы появятся
-только после передачи ML-командой согласованного `docs/API_CONTRACT.md` и
-валидированных артефактов. Пока контракт и артефакты отсутствуют, прогнозные
-маршруты и страницы честно сообщают о недоступности, не генерируя
-демонстрационные значения.
+Сейчас готов защищённый локальный контур: интерфейс Next.js, адаптер
+обезличенных данных, fail-closed FastAPI, Bearer/RBAC, аудит целостности,
+тесты и CI-гейты. Локальный pipeline может обучить только
+`sensor_failure` по слабой метке `silence_horizon_proxy`; релиз появляется лишь
+после temporal holdout, отдельной калибровки и строгих gates
+`precision > 0.70` и `recall > 0.50`. Пожарный риск, доступ и износ остаются
+недоступными до появления подтверждённых источников и не заменяются
+демонстрационными значениями.
 
 ## Архитектура
 
@@ -24,10 +26,11 @@ RBAC-модель, аудит целостности, тесты и CI-гейт�
     -> GET /api/local-situation (Next.js, no-store, только listener 127.0.0.1)
     -> React UI + Zustand timeline + доступные таблицы и графики
 
-Внешний ML-контур (зона ML-команды)
-    -> docs/API_CONTRACT.md + predictions.json / REST API
-    -> GET /api/predictions: read-only импорт JSON-экспортов
-    -> UI: probability, horizon, factors, решение диспетчера
+Локальный ML-контур (data не покидает машину владельца)
+    -> causal features -> temporal split/purge -> holdout calibration
+    -> ml/models/sensor_failure/vN: Skops + model card + SHA-256 manifests
+    -> GET /api/predictions: read-only проверка и импорт proxy-экспорта
+    -> UI: evidence tier, probability, horizon, глобальные факторы, решение
 
 Клиент / интеграции
     -> FastAPI /api/v1 (Bearer schema -> доверенный IdP -> RBAC)
@@ -35,8 +38,8 @@ RBAC-модель, аудит целостности, тесты и CI-гейт�
 ```
 
 Границы намеренные: UI не читает `data/` напрямую; connectors не вычисляют
-прогнозы; платформа не изменяет файлы в `ml/` или `models/`; внешние
-интеграции пока read-only и fail-closed.
+прогнозы; только локальная training-команда создаёт новую неизменяемую версию
+в `ml/models`; API и внешние интеграции читают её read-only и fail-closed.
 
 ## Быстрый локальный запуск
 
@@ -49,7 +52,14 @@ RBAC-модель, аудит целостности, тесты и CI-гейт�
    & .\.venv\Scripts\python.exe scripts/build_local_snapshot.py
    ```
 
-3. Установите frontend-зависимости и запустите UI:
+3. При необходимости создайте первый локальный proxy-релиз. Команда сама
+   отменит публикацию, если temporal holdout не прошёл gates:
+
+   ```powershell
+   & .\.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v1
+   ```
+
+4. Установите frontend-зависимости и запустите UI:
 
    ```powershell
    npm ci --ignore-scripts
@@ -73,12 +83,13 @@ RBAC-модель, аудит целостности, тесты и CI-гейт�
 
 ## Известные риски
 
-`npm audit --omit=dev` выявляет 1 high и 1 moderate в транзитивном
-`postcss@8.4.31` из `next@15.5.25`. Для устранения npm предлагает мажорное
-обновление Next.js до 16.3.5. В текущем локальном профиле снижающими мерами
-служат listener `127.0.0.1` и отсутствие обработки пользовательского CSS;
-обновление назначено на период после хакатона. Полный перечень advisory,
-обоснование и план — в [RISK_REGISTER.md](docs/RISK_REGISTER.md).
+Главные незакрытые границы — отсутствие криптографической подписи ML-релиза,
+SBOM и доверенного внутреннего registry, внешнего неизменяемого аудита,
+корпоративного IdP/MFA и защищённого сетевого deployment. Локальный SHA-256 manifest
+обнаруживает изменение артефакта, но не удостоверяет издателя. Модель угроз и
+принятые меры описаны в [THREAT_MODEL.md](docs/THREAT_MODEL.md), результаты
+последнего инструментального прогона — в
+[SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
 
 ## Проверки
 
@@ -102,15 +113,22 @@ py -m bandit -r apps packages scripts -c .bandit.yaml
 - [SPEC.md](docs/SPEC.md) — продуктовые и UI-границы.
 - [DATA_MAPPING.md](docs/DATA_MAPPING.md) — контракт локального снимка и
   соответствие Приложению 1 ТЗ.
+- [ML_CAPABILITIES.md](docs/ML_CAPABILITIES.md) — доступность четырёх задач и
+  evidence tiers.
+- [ML_METHODS.md](docs/ML_METHODS.md) — temporal-методика, gates и артефакты.
 - [TZ_COMPLIANCE.md](docs/TZ_COMPLIANCE.md) — честная построчная сверка с ТЗ.
+- [SECURITY.md](docs/SECURITY.md) — политика безопасной эксплуатации.
+- [THREAT_MODEL.md](docs/THREAT_MODEL.md) — цепочка атак, MITRE ATT&CK и риски.
+- [PRIVACY.md](docs/PRIVACY.md) — минимизация и локальный периметр данных.
 - [SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) — защита данных и ограничения.
 - [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) — безопасный пятиминутный показ.
 - [ROADMAP.md](docs/ROADMAP.md) — этапы до промышленного контура.
 
-## Передача от ML-команды
+## Локальный ML-релиз
 
-`GET /api/predictions` уже read-only читает корректные
-`ml/models/<case>/v<N>/predictions.json` и возвращает `503` с `pending`, пока
-экспортов нет. Платформенный слой не обучает модели и не дублирует inference.
-После передачи и согласования `docs/API_CONTRACT.md` следующая работа —
-контрактные тесты полей, REST-клиент и UI-поток верификации.
+На машине владельца данных команда `scripts/train_sensor_failure.py` читает
+локальные журналы, выбирает модель без доступа к финальному test и атомарно
+публикует `ml/models/sensor_failure/vN`. `GET /api/predictions` read-only
+проверяет схему, evidence tier, model card и SHA-256; при отсутствии
+доверенного экспорта возвращает `503 pending`. Подробный безопасный порядок —
+в [LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md).

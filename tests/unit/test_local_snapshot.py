@@ -6,7 +6,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from forpost_connectors.local_snapshot import SourceSnapshotError, build_local_snapshot
+from forpost_connectors.local_snapshot import (
+    SourceSnapshotError,
+    build_local_snapshot,
+    load_training_window,
+)
 
 EVENT_HEADERS = [
     "ид_события",
@@ -99,6 +103,90 @@ def write_valid_sources(raw_root: Path, events: list[dict[str, str]] | None = No
         ],
         bom=True,
     )
+
+
+def test_training_window_uses_guarded_sources_without_public_snapshot_limit(monkeypatch, tmp_path):
+    """ML-reader остаётся локальным, но не обрезает окно публичным лимитом UI."""
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(raw_root)
+
+    window = load_training_window(raw_root, max_events=1_000)
+
+    assert len(window.events) == 1
+    assert len(window.channels) == 1
+    assert window.scanned_event_count == 1
+
+
+def test_training_window_keeps_contiguous_latest_tail_and_marks_truncation(monkeypatch, tmp_path):
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    events = [
+        {
+            "ид_события": str(index),
+            "ид_канала_данных": "20",
+            "дата": f"2026-01-{index + 1:02d}",
+            "время": "10:00:00",
+            "тревожное": "0",
+            "значение_датчика": str(index),
+        }
+        for index in range(10)
+    ]
+    write_valid_sources(raw_root, events)
+
+    window = load_training_window(raw_root, max_events=3)
+
+    assert [event.event_id for event in window.events] == ["9", "8", "7"]
+    assert window.truncated_before is True
+
+
+def test_training_window_reads_all_year_labelled_journals(monkeypatch, tmp_path):
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(raw_root)
+    write_csv(
+        raw_root / "ext-journal-2025.csv",
+        EVENT_HEADERS,
+        [
+            {
+                "ид_события": "800",
+                "ид_канала_данных": "20",
+                "дата": "2025-08-01",
+                "время": "10:00:00",
+                "тревожное": "0",
+                "значение_датчика": "6",
+            }
+        ],
+    )
+
+    window = load_training_window(raw_root, max_events=10)
+
+    assert {event.event_id for event in window.events} == {"800", "900"}
+    assert window.truncated_before is False
+
+
+def test_training_window_stops_before_older_partition_after_tail_is_complete(monkeypatch, tmp_path):
+    """Старые партиции не должны перечитываться после набора непрерывного хвоста."""
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    events = [
+        {
+            "ид_события": str(index),
+            "ид_канала_данных": "20",
+            "дата": f"2026-08-{index + 1:02d}",
+            "время": "10:00:00",
+            "тревожное": "0",
+            "значение_датчика": str(index),
+        }
+        for index in range(5)
+    ]
+    write_valid_sources(raw_root, events)
+    older = raw_root / "ext-journal-2025.csv"
+    with older.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(EVENT_HEADERS)
+        writer.writerow(["old", "20", "2025-01-01", "10:00:00", "0", "1", "extra"])
+
+    window = load_training_window(raw_root, max_events=3)
+
+    assert [event.event_id for event in window.events] == ["4", "3", "2"]
+    assert window.truncated_before is True
 
 
 def load_snapshot_script():

@@ -45,6 +45,19 @@ describe('findGuardViolations', () => {
     ]);
   });
 
+  it('blocks local model registry artifacts on every platform', () => {
+    expect(
+      findGuardViolations([
+        { path: 'ml/models/sensor_failure/v1/model.skops', size: 128 },
+        { path: 'ML\\Models\\sensor_failure\\v1\\model-card.json', size: 128 },
+        { path: 'ml/config.yaml', size: 128 },
+      ]),
+    ).toEqual([
+      'Запрещено добавлять в индекс ML-артефакт: ml/models/sensor_failure/v1/model.skops',
+      'Запрещено добавлять в индекс ML-артефакт: ML/Models/sensor_failure/v1/model-card.json',
+    ]);
+  });
+
   it('blocks common source-data exports outside the protected directory', () => {
     expect(
       findGuardViolations([

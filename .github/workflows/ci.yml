@@ -198,8 +198,9 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install hatchling editables pytest httpx fastapi slowapi uvicorn pydantic pandas openpyxl
-          pip install --no-build-isolation -e ./packages/domain -e ./packages/prediction -e ./packages/connectors -e ./packages/platform -e ./apps/api
+          pip install --require-hashes -r requirements-prod.lock
+          pip install pytest httpx
+          pip install --no-build-isolation --no-deps -e ./packages/domain -e ./packages/prediction -e ./packages/connectors -e ./packages/platform -e ./apps/api
 
       - name: Run Python tests
         run: pytest tests -v
@@ -287,6 +288,5 @@ jobs:
       - name: Audit Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pip-audit hatchling editables
-          pip install --no-build-isolation -e ./packages/domain -e ./packages/prediction -e ./packages/connectors -e ./packages/platform -e ./apps/api
-          pip-audit --skip-editable
+          pip install pip-audit
+          pip-audit --disable-pip -r requirements-prod.lock

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { getPageName, getSourceLabel } from './Header';
+import { getModelLabel, getPageName, getSourceLabel } from './Header';
 
 describe('getPageName', () => {
   it('возвращает известное имя раздела и безопасное имя для неизвестного пути', () => {
@@ -15,5 +15,13 @@ describe('getSourceLabel', () => {
     expect(getSourceLabel('ready', 'historical', false, null)).toBe('Исторический источник');
     expect(getSourceLabel('ready', 'historical', true, null)).toBe('Обновление снимка');
     expect(getSourceLabel('ready', 'historical', false, 'error')).toBe('Исторический источник · обновление недоступно');
+  });
+});
+
+describe('getModelLabel', () => {
+  it('не противоречит фактической доступности проверенного экспорта', () => {
+    expect(getModelLabel('loading')).toBe('ML-модель: проверка');
+    expect(getModelLabel('ready')).toBe('ML-модель: доступна');
+    expect(getModelLabel('unavailable')).toBe('ML-модель: недоступна');
   });
 });

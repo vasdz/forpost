@@ -1,0 +1,16 @@
+# Верхнеуровневые зависимости локального production-контура.
+# requirements-prod.lock генерируется из этого файла с --generate-hashes.
+editables>=0.5,<1
+fastapi>=0.111.0,<1
+hatchling>=1.25,<2
+idna>=3.15,<4
+numpy>=2.0.0,<3
+openpyxl>=3.1.0,<4
+pandas>=2.2.0,<4
+pydantic>=2.7.0,<3
+PyYAML>=6.0,<7
+scikit-learn==1.9.1
+skops==0.15.0
+slowapi>=0.1.9,<0.2
+typing-extensions>=4.16.0
+uvicorn>=0.30.0,<1

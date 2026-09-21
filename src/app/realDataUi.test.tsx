@@ -46,10 +46,52 @@ const operations = vi.hoisted(() => ({
   createServiceDraft: vi.fn(),
 }));
 
+const predictionState = vi.hoisted(() => {
+  const predictions = [
+    {
+      id: 'prediction-sensor', entityType: 'sensor', entityId: 'channel-1',
+      predictionType: 'sensor_failure', probability: 0.82, anomalyScore: null,
+      evidenceTier: 'proxy', calibrated: true, provenance: 'derived',
+      confidence: { lower: 0.74, upper: 0.88 },
+      modelMetrics: { precision: 0.78, recall: 0.68, f1: 0.72, prAuc: 0.76, brierScore: 0.14 },
+      qualityStatus: 'passed', limitations: ['Прокси-метка тишины не подтверждает физический отказ'],
+      predictedAt: '2026-09-18T12:00:00Z', horizonHours: 24, modelVersion: 'v1',
+      factors: [{ factor: 'Давность сигнала', weight: 0.7, description: 'Канал дольше обычного не передавал события' }],
+      recommendedAction: 'Проверить канал и питание датчика', priority: 'high', status: 'new',
+    },
+    {
+      id: 'prediction-fire', entityType: 'location', entityId: 'object-1',
+      predictionType: 'fire_risk', probability: null, anomalyScore: 0.91,
+      evidenceTier: 'anomaly', calibrated: false, provenance: 'derived', confidence: null,
+      modelMetrics: null, qualityStatus: 'limited',
+      limitations: ['Нет подтверждённой разметки пожарных инцидентов'],
+      predictedAt: '2026-09-18T12:00:00Z', horizonHours: 24, modelVersion: 'v1',
+      factors: [{ factor: 'Комбинация сигналов', weight: 1, description: 'Нетипичная совместная активность каналов' }],
+      recommendedAction: 'Проверить первичные сигналы', priority: 'high', status: 'new',
+    },
+    {
+      id: 'prediction-wear', entityType: 'location', entityId: 'object-1',
+      predictionType: 'infrastructure_wear', probability: null, anomalyScore: 0.64,
+      evidenceTier: 'scenario', calibrated: false, provenance: 'simulated', confidence: null,
+      modelMetrics: null, qualityStatus: 'limited', limitations: ['История ремонтов недоступна'],
+      predictedAt: '2026-09-18T12:00:00Z', horizonHours: 168, modelVersion: 'v1',
+      factors: [{ factor: 'Возрастной сценарий', weight: 1, description: 'Оценка построена на сценарных параметрах' }],
+      recommendedAction: 'Уточнить паспорт оборудования', priority: 'medium', status: 'new',
+    },
+  ];
+  return {
+    fetchPredictions: vi.fn().mockResolvedValue(predictions),
+    fetchPredictionFeed: vi.fn().mockResolvedValue({
+      status: 'ready', availableTypes: ['sensor_failure'], predictions,
+    }),
+  };
+});
+
 vi.mock('@/data/operationsClient', async () => {
   const actual = await vi.importActual<typeof import('@/data/operationsClient')>('@/data/operationsClient');
   return { ...actual, ...operations };
 });
+vi.mock('@/data/predictionsClient', () => predictionState);
 
 const localSituationState = vi.hoisted(() => ({
   value: {
@@ -113,12 +155,14 @@ describe('интерфейс локального снимка', () => {
     expect(screen.queryByText(/Активные прогнозы/i)).not.toBeInTheDocument();
   });
 
-  it('показывает на странице датчиков только наблюдаемые каналы и события', () => {
+  it('показывает proxy-прогноз отдельно от наблюдаемых каналов и событий', async () => {
     render(<SensorFailurePage />);
 
     expect(screen.getByRole('heading', { name: 'Наблюдения по каналам датчиков' })).toBeInTheDocument();
     expect(screen.getByRole('table', { name: 'Наблюдения датчиков' })).toHaveTextContent('event-1');
-    expect(screen.queryByRole('columnheader', { name: 'Вероятность' })).not.toBeInTheDocument();
+    expect(await screen.findByText('82%')).toBeInTheDocument();
+    expect(screen.getByText('Прокси-модель')).toBeInTheDocument();
+    expect(screen.getByText(/не подтверждает физический отказ/i)).toBeInTheDocument();
   });
 
   it('даёт поиск, экспорт и детали только для доступных реестров', () => {
@@ -170,15 +214,29 @@ describe('интерфейс локального снимка', () => {
     await waitFor(() => expect(screen.getByRole('table', { name: 'Табличное представление схемы объектов' })).toHaveTextContent('Объект 1'));
   });
 
+  it('не показывает anomaly score как результат без валидированной модели', async () => {
+    render(<FireRiskPage />);
+
+    expect(await screen.findByRole('heading', { name: 'Прогнозы недоступны' })).toBeInTheDocument();
+    expect(screen.queryByText(/Индекс аномалии/)).not.toBeInTheDocument();
+    expect(screen.queryByText('91%')).not.toBeInTheDocument();
+  });
+
+  it('не показывает сценарный износ как подтверждённый результат', async () => {
+    render(<InfrastructureWearPage />);
+
+    expect(await screen.findByRole('heading', { name: 'Прогнозы недоступны' })).toBeInTheDocument();
+    expect(screen.queryByText('Сценарий')).not.toBeInTheDocument();
+    expect(screen.getByText(/сценарный экспорт.*не найден/i)).toBeInTheDocument();
+  });
+
   it.each([
-    ['Пожарный риск недоступен', FireRiskPage],
-    ['Несанкционированный доступ недоступен', UnauthorizedAccessPage],
-    ['Износ инфраструктуры недоступен', InfrastructureWearPage],
+    ['Несанкционированный доступ', UnauthorizedAccessPage],
     ['Настройки недоступны', DesignSystemPage],
-  ])('не формирует вымышленные результаты: %s', (heading, Page) => {
+  ])('не формирует результаты без источника: %s', async (heading, Page) => {
     render(<Page />);
 
-    expect(screen.getByRole('heading', { name: heading, level: 1 })).toBeInTheDocument();
-    expect(screen.getByText(/не подключен|отсутствуют|не формируется/i)).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument();
+    expect(screen.getByText(/не подключен|отсутствуют|не формируется|не найден/i)).toBeInTheDocument();
   });
 });

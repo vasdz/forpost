@@ -23,6 +23,7 @@ RAW_DATA_ROOT: Final[Path] = PROJECT_ROOT / "data" / "raw"
 PROCESSED_DATA_ROOT: Final[Path] = PROJECT_ROOT / "data" / "processed"
 MAX_SUPPLEMENTAL_JOURNAL_BYTES: Final[int] = 32 * 1024 * 1024
 MAX_EVENTS: Final[int] = 500
+MAX_TRAINING_EVENTS: Final[int] = 2_000_000
 ALARM_EVENT_RESERVE: Final[int] = 100
 MAX_CSV_FILES: Final[int] = 64
 # Ограничения остаются конечными, но учитывают фактические годовые выгрузки.
@@ -151,6 +152,98 @@ class LocalSituationSnapshot:
             "objects": [_camel_case(asdict(obj)) for obj in self.objects],
             "events": [_camel_case(asdict(event)) for event in self.events],
         }
+
+
+@dataclass(frozen=True)
+class TrainingWindow:
+    """Ограниченное локальное окно для ML, которое никогда не сериализуется в UI."""
+
+    channels: tuple[ChannelRegistryEntry, ...]
+    events: tuple[ObservedEvent, ...]
+    scanned_event_count: int
+    skipped_event_count: int
+    truncated_before: bool
+
+
+def load_training_window(
+    raw_root: Path, *, max_events: int = MAX_TRAINING_EVENTS
+) -> TrainingWindow:
+    """Читает непрерывный правый хвост всей истории с явным левым усечением."""
+    if not 0 < max_events <= MAX_TRAINING_EVENTS:
+        raise SourceSnapshotError(
+            f"Лимит событий обучения должен быть от 1 до {MAX_TRAINING_EVENTS}"
+        )
+    checked_raw_root = _guard_directory(raw_root, _raw_data_root(), "Каталог источника")
+    discovered = _discover_csv_roles(checked_raw_root)
+    selected_journals = _select_training_journals(discovered["journals"])
+    # Большие годовые журналы валидируются потоково только до набора правого хвоста.
+    _validate_selected_csv_inputs((discovered["channels"], discovered["objects"]))
+    objects = _read_objects(discovered["objects"])
+    channels, _ = _read_channels(discovered["channels"], {item.object_id for item in objects})
+    events, scanned, skipped, truncated = _read_training_events(selected_journals, max_events)
+    return TrainingWindow(
+        channels=channels,
+        events=events,
+        scanned_event_count=scanned,
+        skipped_event_count=skipped,
+        truncated_before=truncated,
+    )
+
+
+def _read_training_events(
+    journals: tuple[Path, ...], max_events: int
+) -> tuple[tuple[ObservedEvent, ...], int, int, bool]:
+    """Выбирает точный непрерывный хвост пригодных событий bounded heap-очередью."""
+    latest: list[tuple[datetime, int, ObservedEvent]] = []
+    scanned_event_count = 0
+    skipped_event_count = 0
+    eligible_event_count = 0
+    scanned_partition_count = 0
+    for path in journals:
+        expected_year_match = YEAR_IN_FILENAME.search(path.name)
+        expected_year = int(expected_year_match.group(1)) if expected_year_match else None
+        for chunk in _read_event_chunks(path):
+            scanned_event_count += len(chunk)
+            if scanned_event_count > MAX_CSV_TOTAL_ROWS:
+                raise SourceSnapshotError(
+                    "Превышено допустимое число строк в прочитанных ML-партициях"
+                )
+            complete_rows = (
+                chunk[list(EVENT_HEADERS)]
+                .fillna("")
+                .apply(lambda column: column.astype(str).str.len() > 0)
+                .all(axis=1)
+            )
+            timestamps = _parse_chunk_timestamps(chunk)
+            invalid_rows = timestamps.isna() | ~complete_rows
+            skipped_event_count += int(invalid_rows.sum())
+            valid_timestamps = timestamps.loc[~invalid_rows]
+            if (
+                expected_year is not None
+                and not valid_timestamps.empty
+                and not valid_timestamps.dt.year.eq(expected_year).all()
+            ):
+                raise SourceSnapshotError("Год события не соответствует годовой партиции журнала")
+            for index, timestamp in valid_timestamps.items():
+                event = _event_from_row(chunk, index, timestamp.to_pydatetime())
+                if not event.analysis_eligible:
+                    continue
+                eligible_event_count += 1
+                _push_latest(
+                    latest,
+                    (timestamp.to_pydatetime(), eligible_event_count, event),
+                    max_events,
+                )
+        scanned_partition_count += 1
+        if expected_year is not None and len(latest) >= max_events:
+            break
+    events = tuple(item[2] for item in sorted(latest, reverse=True))
+    return (
+        events,
+        scanned_event_count,
+        skipped_event_count,
+        eligible_event_count > max_events or scanned_partition_count < len(journals),
+    )
 
 
 def build_local_snapshot(
@@ -315,6 +408,30 @@ def _select_journals(journals: tuple[Path, ...]) -> tuple[Path, ...]:
     return (*latest, *sorted(supplemental))
 
 
+def _select_training_journals(journals: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Выбирает всю доступную годовую историю для временного ML-контура."""
+    year_labelled: dict[int, Path] = {}
+    supplemental: list[Path] = []
+    for path in journals:
+        match = YEAR_IN_FILENAME.search(path.name)
+        if match:
+            year = int(match.group(1))
+            if year in year_labelled:
+                raise SourceSnapshotError("Обнаружен дубликат годового журнала для ML")
+            year_labelled[year] = path
+        elif path.stat().st_size <= MAX_SUPPLEMENTAL_JOURNAL_BYTES:
+            supplemental.append(path)
+    if not year_labelled:
+        raise SourceSnapshotError("Не найден журнал с годовой меткой в имени")
+    # Сначала читаются малые недатированные дополнения, затем годовые партиции от
+    # новых к старым. После заполнения хвоста старшие годы уже не могут повлиять
+    # на последние события при соблюдении проверяемого контракта partition-year.
+    return (
+        *sorted(supplemental),
+        *(year_labelled[year] for year in sorted(year_labelled, reverse=True)),
+    )
+
+
 def _read_channels(
     path: Path, object_ids: set[str]
 ) -> tuple[tuple[ChannelRegistryEntry, ...], bool]:
@@ -393,24 +510,7 @@ def _read_latest_events(
             selected_indices = recent_indices.union(alarm_indices, sort=False)
             for offset, index in enumerate(selected_indices, start=1):
                 recorded_at = timestamps.loc[index].to_pydatetime()
-                event_id = _required_value(chunk.at[index, "ид_события"])
-                channel_id = _required_value(chunk.at[index, "ид_канала_данных"])
-                is_alarm = _parse_alarm(chunk.at[index, "тревожное"])
-                sensor_value = _required_value(chunk.at[index, "значение_датчика"])
-                quality_code, analysis_eligible = _classify_event_quality(
-                    sensor_value, is_alarm, recorded_at
-                )
-                event = ObservedEvent(
-                    canonical_id=_canonical_event_id(event_id, channel_id, recorded_at),
-                    event_id=event_id,
-                    channel_id=channel_id,
-                    recorded_at=recorded_at.isoformat(timespec="seconds"),
-                    is_alarm=is_alarm,
-                    sensor_value=sensor_value,
-                    quality_code=quality_code,
-                    analysis_eligible=analysis_eligible,
-                    provenance="observed",
-                )
+                event = _event_from_row(chunk, index, recorded_at)
                 candidate = (recorded_at, scanned_event_count - len(chunk) + offset, event)
                 _push_latest(recent_heap, candidate, max_events)
                 if event.is_alarm is True:
@@ -427,6 +527,25 @@ def _read_latest_events(
         tuple(item[2] for item in sorted(selected.values(), reverse=True)),
         scanned_event_count,
         skipped_event_count,
+    )
+
+
+def _event_from_row(chunk: pd.DataFrame, index: object, recorded_at: datetime) -> ObservedEvent:
+    event_id = _required_value(chunk.at[index, "ид_события"])
+    channel_id = _required_value(chunk.at[index, "ид_канала_данных"])
+    is_alarm = _parse_alarm(chunk.at[index, "тревожное"])
+    sensor_value = _required_value(chunk.at[index, "значение_датчика"])
+    quality_code, analysis_eligible = _classify_event_quality(sensor_value, is_alarm, recorded_at)
+    return ObservedEvent(
+        canonical_id=_canonical_event_id(event_id, channel_id, recorded_at),
+        event_id=event_id,
+        channel_id=channel_id,
+        recorded_at=recorded_at.isoformat(timespec="seconds"),
+        is_alarm=is_alarm,
+        sensor_value=sensor_value,
+        quality_code=quality_code,
+        analysis_eligible=analysis_eligible,
+        provenance="observed",
     )
 
 

@@ -3,7 +3,9 @@ from forpost_connectors.eda import EdaConfig, EdaError, EdaResult, analyze_datas
 from forpost_connectors.local_snapshot import (
     LocalSituationSnapshot,
     SourceSnapshotError,
+    TrainingWindow,
     build_local_snapshot,
+    load_training_window,
 )
 
 __all__ = [
@@ -14,6 +16,8 @@ __all__ = [
     "LocalSituationSnapshot",
     "SourceSchemaError",
     "SourceSnapshotError",
+    "TrainingWindow",
     "analyze_dataset",
     "build_local_snapshot",
+    "load_training_window",
 ]

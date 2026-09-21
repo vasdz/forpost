@@ -1,7 +1,7 @@
 'use client';
 
-import { CapabilityUnavailablePage } from '@/components/features/CapabilityUnavailablePage';
+import { PredictionCapabilityPage } from '@/components/features/PredictionCapability';
 
 export default function InfrastructureWearPage() {
-  return <CapabilityUnavailablePage eyebrow="Прогнозирование" title="Износ инфраструктуры недоступен" description="Для оценки износа необходимы реестр оборудования, даты ввода и история ремонтов." unavailableDescription="Реестр оборудования, история ремонтов и модель износа не подключены; рейтинг, план работ и паспорт объекта не формируются." />;
+  return <PredictionCapabilityPage type="infrastructure_wear" title="Износ инфраструктуры" description="Приоритизация обслуживания с отделением подтверждённой модели от сценарной оценки." unavailableDescription="Модель или сценарный экспорт износа не найден; оценка не формируется." />;
 }

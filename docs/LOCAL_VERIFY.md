@@ -53,8 +53,9 @@
 ```powershell
 $forpostPython = ".\.venv\Scripts\python.exe"
 & $forpostPython -m pip install --upgrade pip
-& $forpostPython -m pip install hatchling editables pytest httpx fastapi slowapi uvicorn pydantic pandas openpyxl ruff bandit semgrep
-& $forpostPython -m pip install --no-build-isolation -e .\packages\domain -e .\packages\prediction -e .\packages\connectors -e .\packages\platform -e .\apps\api
+& $forpostPython -m pip install --require-hashes -r requirements-prod.lock
+& $forpostPython -m pip install pytest httpx ruff bandit semgrep pip-audit
+& $forpostPython -m pip install --no-build-isolation --no-deps -e .\packages\domain -e .\packages\prediction -e .\packages\connectors -e .\packages\platform -e .\apps\api
 & $forpostPython -m pip check
 ```
 
@@ -98,9 +99,9 @@ npm run build
 
 $env:SEMGREP_SEND_METRICS = 'off'
 $env:SEMGREP_ENABLE_VERSION_CHECK = '0'
-semgrep scan --config semgrep.yml --error --exclude /data/** --exclude node_modules --exclude .next --exclude references .
+semgrep scan --no-git-ignore --config semgrep.yml --error --exclude data --exclude ml/models --exclude node_modules --exclude .next --exclude .venv --exclude references --exclude .git --exclude .idea .
 
-trufflehog filesystem .github .githooks apps/api packages scripts src docs package.json package-lock.json pyproject.toml semgrep.yml .gitignore --no-verification --no-update --fail --exclude-paths=.trufflehog-exclude
+trufflehog filesystem .github .githooks apps/api packages scripts src docs ml/config.yaml requirements-prod.in requirements-prod.lock package.json package-lock.json pyproject.toml semgrep.yml .gitignore --no-verification --no-update --fail --exclude-paths=.trufflehog-exclude
 ```
 
 Локальный Semgrep использует только `semgrep.yml`. Профили реестра Semgrep
@@ -124,6 +125,26 @@ curl.exe -sS -o NUL -w "%{http_code}\n" http://127.0.0.1:3000/api/local-situatio
 
 Ответ `200` означает, что локальный снимок доступен. `503` означает только
 недоступность снимка и не должен заменяться демонстрационным набором данных.
+
+## Локальное обучение proxy-модели
+
+Команду можно запускать только на машине владельца данных после проверки
+снимка и только с новой, ещё не существующей версией:
+
+```powershell
+& $forpostPython scripts/train_sensor_failure.py --version v1
+```
+
+Pipeline потоково читает новые годовые партиции до набора непрерывного хвоста,
+не печатает строки источника и не публикует частичный результат. Каталог
+`ml/models/sensor_failure/v1` появляется атомарно только после прохождения
+temporal validation/test, калибровки, quality gates и проверки времени
+inference. Провал любого gate завершается сообщением без числовых данных
+выгрузки и без артефакта. Повторное использование версии запрещено; для
+следующего принятого релиза укажите `v2`, `v3` и так далее.
+
+`ml/models` игнорируется Git и не должен становиться целью внешнего сканера,
+CI, синхронизации или удалённого backup без отдельного согласованного контура.
 
 ## Перед передачей кода
 

@@ -10,6 +10,7 @@ __pycache__/
 /data/*
 !/data/README.md
 /models/
+/ml/models/
 node_modules/
 .next/
 out/

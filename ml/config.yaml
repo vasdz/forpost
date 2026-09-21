@@ -1,18 +1,21 @@
 # Локальные параметры ML-контура; артефакты и результаты сохраняются вне Git.
 seed: 20260915
-feature_schema_version: "1"
-horizons_hours: [24, 48, 168]
-feature_windows_hours: [1, 24, 168, 720]
+feature_schema_version: "4"
+label_strategy: "silence_horizon_proxy"
+horizon_hours: 24
+cutoff_count: 48
+max_training_events: 2000000
+feature_windows_hours: [1, 6, 24]
 minimum_positive_examples: 50
+minimum_negative_examples: 50
 validation_fraction: 0.2
 test_fraction: 0.2
-probability_thresholds:
-  sensor_failure: 0.7
-  fire_risk: 0.7
-  unauthorized_access: 0.7
-  infrastructure_wear: 0.7
-task_weights:
-  sensor_failure: 1.0
-  fire_risk: 1.0
-  unauthorized_access: 1.0
-  infrastructure_wear: 1.0
+calibration_fraction: 0.2
+purge_hours: 24
+thresholds: [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90]
+minimum_precision: 0.7
+minimum_recall: 0.5
+maximum_alert_rate: 0.35
+maximum_expected_calibration_error: 0.20
+maximum_brier_score: 0.25
+minimum_baseline_pr_auc_delta: 0.01

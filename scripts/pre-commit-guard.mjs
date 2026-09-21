@@ -50,6 +50,10 @@ export function findGuardViolations(changedFiles) {
       violations.push(`Запрещено добавлять в индекс файл данных: ${normalizedPath}`);
     }
 
+    if (windowsNormalizedPath.startsWith('ml/models/')) {
+      violations.push(`Запрещено добавлять в индекс ML-артефакт: ${normalizedPath}`);
+    }
+
     // Расширения не заменяют серверный DLP, но предотвращают случайный перенос
     // типовых выгрузок и архивов из защищённого корня в другой каталог репозитория.
     if (!isProtectedDataPath && hasProtectedExportExtension(normalizedPath)) {

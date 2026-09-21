@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 
 class EvaluationUnavailableError(ValueError):
@@ -20,6 +21,21 @@ class BinaryMetrics:
     f1: float
     pr_auc: float
     roc_auc: float
+    brier_score: float
+    expected_calibration_error: float
+    alert_rate: float
+    true_positive: int
+    false_positive: int
+    false_negative: int
+    true_negative: int
+
+
+@dataclass(frozen=True)
+class ThresholdSelection:
+    """Рабочий порог, выбранный только на validation-наборе."""
+
+    threshold: float
+    metrics: BinaryMetrics
 
 
 def evaluate_binary_probabilities(
@@ -47,6 +63,7 @@ def evaluate_binary_probabilities(
     true_positive = int(np.count_nonzero(predicted & (truth == 1)))
     false_positive = int(np.count_nonzero(predicted & (truth == 0)))
     false_negative = int(np.count_nonzero(~predicted & (truth == 1)))
+    true_negative = int(np.count_nonzero(~predicted & (truth == 0)))
     precision = (
         true_positive / (true_positive + false_positive) if true_positive + false_positive else 0.0
     )
@@ -58,23 +75,83 @@ def evaluate_binary_probabilities(
         f1=f1,
         pr_auc=_average_precision(truth, scores),
         roc_auc=_roc_auc(truth, scores),
+        brier_score=float(np.mean((scores - truth) ** 2)),
+        expected_calibration_error=_expected_calibration_error(truth, scores),
+        alert_rate=float(np.mean(predicted)),
+        true_positive=true_positive,
+        false_positive=false_positive,
+        false_negative=false_negative,
+        true_negative=true_negative,
+    )
+
+
+def select_operating_threshold(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    thresholds: tuple[float, ...],
+    minimum_recall: float,
+    maximum_alert_rate: float,
+    minimum_precision: float = 0.0,
+) -> ThresholdSelection:
+    """Выбирает лучший F1 среди порогов, допустимых для диспетчерского процесса."""
+    if not thresholds:
+        raise ValueError("Нужен хотя бы один кандидат рабочего порога")
+    if not 0 <= minimum_precision <= 1 or not 0 <= minimum_recall <= 1:
+        raise ValueError("Ограничения precision и recall должны быть от 0 до 1")
+    if not 0 < maximum_alert_rate <= 1:
+        raise ValueError("Допустимая доля тревог должна быть больше 0 и не больше 1")
+
+    observed_scores = np.asarray(probabilities, dtype=np.float64)
+    candidate_thresholds = {
+        float(value)
+        for value in (*thresholds, *observed_scores.tolist())
+        if np.isfinite(value) and 0 < float(value) < 1
+    }
+    candidates: list[ThresholdSelection] = []
+    for threshold in sorted(candidate_thresholds):
+        metrics = evaluate_binary_probabilities(labels, probabilities, threshold=threshold)
+        if (
+            metrics.precision > minimum_precision
+            and metrics.recall > minimum_recall
+            and metrics.alert_rate <= maximum_alert_rate
+        ):
+            candidates.append(ThresholdSelection(threshold=threshold, metrics=metrics))
+    if not candidates:
+        raise EvaluationUnavailableError("Не найден рабочий порог для заданных ограничений")
+    return max(
+        candidates,
+        key=lambda item: (
+            item.metrics.f1,
+            item.metrics.precision,
+            item.metrics.recall,
+            -item.metrics.alert_rate,
+            item.threshold,
+        ),
     )
 
 
 def _average_precision(truth: np.ndarray, scores: np.ndarray) -> float:
-    order = np.argsort(-scores, kind="stable")
-    ordered_truth = truth[order]
-    cumulative_true_positive = np.cumsum(ordered_truth)
-    ranks = np.arange(1, len(ordered_truth) + 1)
-    precision_at_rank = cumulative_true_positive / ranks
-    return float(precision_at_rank[ordered_truth == 1].sum() / ordered_truth.sum())
+    return float(average_precision_score(truth, scores))
 
 
 def _roc_auc(truth: np.ndarray, scores: np.ndarray) -> float:
-    positive_scores = scores[truth == 1]
-    negative_scores = scores[truth == 0]
-    comparisons = positive_scores[:, None] - negative_scores[None, :]
-    return float(
-        (np.count_nonzero(comparisons > 0) + 0.5 * np.count_nonzero(comparisons == 0))
-        / comparisons.size
-    )
+    return float(roc_auc_score(truth, scores))
+
+
+def _expected_calibration_error(
+    truth: np.ndarray, scores: np.ndarray, *, bin_count: int = 10
+) -> float:
+    boundaries = np.linspace(0.0, 1.0, bin_count + 1)
+    weighted_error = 0.0
+    for index in range(bin_count):
+        lower = boundaries[index]
+        upper = boundaries[index + 1]
+        in_bin = (scores >= lower) & (scores < upper if index < bin_count - 1 else scores <= upper)
+        count = int(np.count_nonzero(in_bin))
+        if not count:
+            continue
+        observed = float(np.mean(truth[in_bin]))
+        predicted = float(np.mean(scores[in_bin]))
+        weighted_error += count / len(scores) * abs(observed - predicted)
+    return weighted_error

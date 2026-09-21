@@ -15,6 +15,20 @@ class PredictionTask(StrEnum):
     INFRASTRUCTURE_WEAR = "infrastructure_wear"
 
 
+class EvidenceTier(StrEnum):
+    """Доказательность результата, которую обязан показывать API и интерфейс."""
+
+    VALIDATED = "validated"
+    PROXY = "proxy"
+    ANOMALY = "anomaly"
+    SCENARIO = "scenario"
+    UNAVAILABLE = "unavailable"
+
+
+class EvidenceTierError(ValueError):
+    """Запрошенная доказательность не подтверждена доступными источниками."""
+
+
 class SourceKind(StrEnum):
     """Типы источников, разрешённые локальным ML-контуром."""
 
@@ -37,6 +51,7 @@ class TaskCapability:
     label_strategy: str | None
     required_sources: frozenset[SourceKind]
     missing_sources: frozenset[SourceKind]
+    maximum_evidence_tier: EvidenceTier
 
 
 _TASK_REQUIREMENTS: dict[PredictionTask, tuple[frozenset[SourceKind], str]] = {
@@ -73,10 +88,42 @@ def assess_task_capability(
     """Возвращает готовность задачи только при наличии всех источников её разметки."""
     required_sources, label_strategy = _TASK_REQUIREMENTS[task]
     missing_sources = required_sources - available_sources
+    maximum_evidence_tier = _maximum_evidence_tier(task, available_sources, missing_sources)
     return TaskCapability(
         task=task,
         training_available=not missing_sources,
         label_strategy=label_strategy if not missing_sources else None,
         required_sources=required_sources,
         missing_sources=missing_sources,
+        maximum_evidence_tier=maximum_evidence_tier,
     )
+
+
+def require_evidence_tier(capability: TaskCapability, requested_tier: EvidenceTier) -> EvidenceTier:
+    """Запрещает повышать доказательность результата выше подтверждённого уровня."""
+    if requested_tier is not capability.maximum_evidence_tier:
+        raise EvidenceTierError("Запрошенный уровень доказательности не подтверждён источниками")
+    return requested_tier
+
+
+def _maximum_evidence_tier(
+    task: PredictionTask,
+    available_sources: frozenset[SourceKind],
+    missing_sources: frozenset[SourceKind],
+) -> EvidenceTier:
+    if not missing_sources:
+        return (
+            EvidenceTier.PROXY if task is PredictionTask.SENSOR_FAILURE else EvidenceTier.VALIDATED
+        )
+    if (
+        task in {PredictionTask.FIRE_RISK, PredictionTask.UNAUTHORIZED_ACCESS}
+        and {
+            SourceKind.EVENTS,
+            SourceKind.CHANNELS,
+        }
+        <= available_sources
+    ):
+        return EvidenceTier.ANOMALY
+    if task is PredictionTask.INFRASTRUCTURE_WEAR and SourceKind.OBJECTS in available_sources:
+        return EvidenceTier.SCENARIO
+    return EvidenceTier.UNAVAILABLE

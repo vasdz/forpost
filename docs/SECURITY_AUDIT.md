@@ -1,16 +1,16 @@
 # Аудит безопасности и периметра данных
 
-Дата проверки: 18 сентября 2026 года.
+Дата проверки: 21 сентября 2026 года.
 
 ## Итог
 
-После исправлений подтверждённых уязвимостей в проверенном исходном коде,
-Git-истории и разрешённых runtime-зависимостях не обнаружено. Аудит выполнен
-локальными независимыми инструментами без Codex Security. `data/raw` и
-`data/processed` не являлись target ни одного сканера и не передавались во
-внешние сервисы.
+После исправлений подтверждённых уязвимостей в проверенном исходном коде и
+разрешённых runtime-зависимостях не обнаружено. Аудит выполнен локальными
+независимыми инструментами без Codex Security. `data/raw`, `data/processed` и
+`ml/models` не являлись target ни одного сканера и не передавались во внешние
+сервисы.
 
-Исправлены четыре проблемы контура:
+К ранее закрытым supply-chain и browser-hardening проблемам добавлены:
 
 - Vitest обновлён с уязвимой ветки до `4.1.11`, а coverage-provider закреплён
   на той же исправленной версии;
@@ -18,8 +18,13 @@ Git-истории и разрешённых runtime-зависимостях н
 - HTML-интерфейс Next.js получил глобальные CSP, anti-clickjacking, nosniff,
   referrer и permissions headers;
 - Python dependency job больше не падает на собственных editable-пакетах:
-  `pip-audit --skip-editable` проверяет стороннее дерево, а код `forpost-*`
-  отдельно покрывают Ruff, Bandit, Semgrep и тесты.
+  `pip-audit` проверяет отдельный hash-pinned production lock, а код
+  `forpost-*` отдельно покрывают Ruff, Bandit, Semgrep и тесты;
+- `data/**` и `ml/models/**` одновременно закрыты `.gitignore`, локальным
+  guard, server-side guard и CI-периметром;
+- локальный ML-релиз публикуется только атомарно после temporal validation/test,
+  калибровки, проверки baseline и метрик. Последний реальный запуск не прошёл
+  validation quality gate, поэтому небезопасный `v1` намеренно не создан.
 
 ## Проверенный периметр
 
@@ -39,20 +44,19 @@ pre-push и CI perimeter guard. Стандартные Next.js launcher-кома
 
 ## Результаты инструментов
 
-- Bandit: 4 805 строк Python, 0 находок всех уровней;
-- Semgrep: 292 применимых правила из локального набора и профилей TypeScript,
-  React, OWASP Top 10 и secrets; 173 versioned-файла, 0 находок;
+- Bandit: 0 находок;
+- Semgrep: 2 локальных project-specific правила, 102 цели, 0 находок;
 - Ruff check/format: без замечаний;
-- TruffleHog: 580 chunks Git-истории, 0 проверенных и 0 неподтверждённых
+- TruffleHog: 424 chunks явного allowlist кода и конфигурации, 0 проверенных и 0 неподтверждённых
   секретов;
-- `npm audit --audit-level=low`: 0 уязвимостей;
-- clean-room `pip-audit --skip-editable`: 0 известных уязвимостей в сторонних
-  runtime-зависимостях, `pip check` — без конфликтов;
+- полный `npm audit --audit-level=low` и production-only audit: 0 уязвимостей;
+- `pip-audit --disable-pip -r requirements-prod.lock`: 0 известных
+  уязвимостей, `pip check` — без конфликтов;
 - ESLint с security-правилами и TypeScript strict: без ошибок;
-- Vitest: 123 теста; Python pytest: 224 теста;
+- Next.js production build: успешно; Vitest: 132 теста; Python pytest: 272 теста;
 - coverage gate учитывает весь `src` и Git-скрипты и закрепляет фактический
-  baseline как неухудшаемый ратчет: 68% statements, 58% branches,
-  71% functions и 71% lines.
+  baseline как неухудшаемый ратчет: 69,84% statements, 61,21% branches,
+  73,24% functions и 73,27% lines.
 
 `run_security_audit.ps1` воспроизводит аудит с явным списком директорий без
 `data`: Ruff, Bandit, Semgrep, npm audit, TruffleHog и clean-room pip-audit.

@@ -1,7 +1,7 @@
 'use client';
 
-import { CapabilityUnavailablePage } from '@/components/features/CapabilityUnavailablePage';
+import { PredictionCapabilityPage } from '@/components/features/PredictionCapability';
 
 export default function FireRiskPage() {
-  return <CapabilityUnavailablePage eyebrow="Прогнозирование" title="Пожарный риск недоступен" description="Для расчёта нужны подтверждённые данные температуры, дыма и допусков на работы." unavailableDescription="Источник температурных и дымовых измерений, АРМ-Контроль и модель пожарного риска не подключены; оценка риска не формируется." />;
+  return <PredictionCapabilityPage type="fire_risk" title="Пожарный риск" description="Совместный анализ температурных, дымовых и событийных сигналов с явным уровнем доказательности." unavailableDescription="Модель или anomaly-экспорт пожарного риска не найден; вероятность не формируется." />;
 }
