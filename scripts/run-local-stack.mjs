@@ -32,7 +32,7 @@ export function getLocalStackLaunches(env = process.env, extraArguments = []) {
     ...env,
     FORPOST_API_SERVICE_TOKEN: token,
   };
-  const nextLaunch = getLocalNextLaunch('dev');
+  const nextLaunch = getLocalNextLaunch('dev', [], env);
 
   return {
     api: {
@@ -68,13 +68,40 @@ export function runLocalStack(argumentsList = process.argv.slice(2)) {
   const next = spawnLaunch(launches.next);
   let stopping = false;
 
+  function stopChild(child, signal) {
+    if (child.exitCode === null && !child.killed) {
+      child.kill(signal);
+    }
+  }
+
+  function removeSignalHandlers() {
+    process.removeListener('SIGINT', onSigint);
+    process.removeListener('SIGTERM', onSigterm);
+  }
+
   function stopSibling(sibling, code, signal) {
     if (stopping) return;
     stopping = true;
-    if (sibling.exitCode === null && !sibling.killed) {
-      sibling.kill('SIGTERM');
-    }
+    removeSignalHandlers();
+    stopChild(sibling, 'SIGTERM');
     process.exitCode = signal === null ? (code ?? 1) : 1;
+  }
+
+  function stopForParentSignal(signal) {
+    if (stopping) return;
+    stopping = true;
+    removeSignalHandlers();
+    stopChild(api, signal);
+    stopChild(next, signal);
+    process.exitCode = signal === 'SIGINT' ? 130 : 143;
+  }
+
+  function onSigint() {
+    stopForParentSignal('SIGINT');
+  }
+
+  function onSigterm() {
+    stopForParentSignal('SIGTERM');
   }
 
   api.on('error', (error) => {
@@ -87,6 +114,8 @@ export function runLocalStack(argumentsList = process.argv.slice(2)) {
   });
   api.on('exit', (code, signal) => stopSibling(next, code, signal));
   next.on('exit', (code, signal) => stopSibling(api, code, signal));
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
 
   return { api, next };
 }

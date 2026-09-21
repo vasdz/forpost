@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 const NEXT_CLI_PATH = fileURLToPath(new URL('../node_modules/next/dist/bin/next', import.meta.url));
 const LOCAL_HOSTNAME = '127.0.0.1';
 
-export function getLocalNextLaunch(mode, extraArguments = []) {
+export function getLocalNextLaunch(mode, extraArguments = [], env = process.env) {
   if (mode !== 'dev' && mode !== 'start') {
     throw new Error('Поддерживаются только режимы Next dev или start.');
   }
@@ -16,7 +16,7 @@ export function getLocalNextLaunch(mode, extraArguments = []) {
     command: process.execPath,
     args: [NEXT_CLI_PATH, mode, '--hostname', LOCAL_HOSTNAME],
     env: {
-      ...process.env,
+      ...env,
       FORPOST_LOCAL_SNAPSHOT: '1',
     },
   };
