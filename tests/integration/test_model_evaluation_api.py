@@ -8,6 +8,8 @@ import pytest
 from fastapi.testclient import TestClient
 from forpost_api.main import app
 from forpost_api.routes import predictions
+from forpost_platform.security.demo_identity import issue_demo_assertion
+from forpost_platform.security.identity import Role, SecuritySubject
 
 
 @pytest.fixture
@@ -35,6 +37,26 @@ def test_evaluation_requires_authentication_before_reading(client, evaluation_ro
     response = client.get("/api/model-evaluation")
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "UNAUTHENTICATED"
+
+
+def test_evaluation_uses_demo_subject_permissions_instead_of_service_token(client, evaluation_route, monkeypatch):
+    """Demo-утверждение не должно заменяться центральным BFF-токеном."""
+    secret = "d" * 48
+    monkeypatch.setenv("FORPOST_DEMO_MODE", "1")
+    monkeypatch.setenv("FORPOST_DEMO_ASSERTION_SECRET", secret)
+    subject = SecuritySubject(
+        user_id="demo-admin",
+        username="Демо-администратор",
+        roles=frozenset({Role.SYSTEM_ADMIN}),
+        allowed_districts=frozenset(),
+        allowed_complexes=frozenset(),
+    )
+    assertion = issue_demo_assertion(subject, secret)
+
+    response = client.get("/api/model-evaluation", headers={"Authorization": f"Bearer demo.{assertion}"})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Недостаточно прав для выполнения операции"
 
 
 @pytest.mark.parametrize(

@@ -95,6 +95,26 @@ describe('fetchModelEvaluation', () => {
     await expect(fetchModelEvaluation(invalidMetric as typeof fetch)).resolves.toEqual({ status: 'unavailable' });
   });
 
+  it.each([
+    '2026-09-21',
+    '2026-09-21T12:00:00',
+    '21.09.2026, 12:00:00+03:00',
+    '2026-09-21 12:00:00+03:00',
+  ])('отклоняет неполный или не-RFC3339 created_at: %s', async (createdAt) => {
+    const fetcher = vi.fn(async () => jsonResponse({ ...validReport, created_at: createdAt }));
+
+    await expect(fetchModelEvaluation(fetcher as typeof fetch)).resolves.toEqual({ status: 'unavailable' });
+  });
+
+  it('отклоняет report с нарушенным инвариантом опубликованного доказательства', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({
+      ...validReport,
+      reason_code: 'release_unavailable',
+    }));
+
+    await expect(fetchModelEvaluation(fetcher as typeof fetch)).resolves.toEqual({ status: 'unavailable' });
+  });
+
   it('отделяет недоступный отчёт 503 от опубликованного доказательства', async () => {
     const fetcher = vi.fn(async () => jsonResponse({
       status: 'unavailable', reason_code: 'evaluation_unavailable',

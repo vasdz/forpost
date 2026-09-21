@@ -213,5 +213,24 @@ function isCandidateOrNull(value: unknown): value is CandidateName | null {
 }
 
 function isTimestampWithTimezone(value: unknown): value is string {
-  return typeof value === 'string' && /(Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
+  if (typeof value !== 'string' || value.length < 20 || value.length > 35 || value[10] !== 'T') return false;
+  const timezoneStart = value.endsWith('Z') ? value.length - 1 : value.length - 6;
+  if (timezoneStart < 19 || (value.endsWith('Z') ? false : !isTimezoneOffset(value, timezoneStart))) return false;
+  const fractionalLength = timezoneStart - 19;
+  if (fractionalLength !== 0 && (fractionalLength < 2 || fractionalLength > 10 || value[19] !== '.')) return false;
+  const digitPositions = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+  return value[4] === '-' && value[7] === '-' && value[13] === ':' && value[16] === ':'
+    && digitPositions.every((position) => isDigit(value.charAt(position)))
+    && [...value.slice(20, timezoneStart)].every(isDigit)
+    && Number.isFinite(Date.parse(value));
+}
+
+function isTimezoneOffset(value: string, start: number): boolean {
+  return (value.charAt(start) === '+' || value.charAt(start) === '-') && value.charAt(start + 3) === ':'
+    && isDigit(value.charAt(start + 1)) && isDigit(value.charAt(start + 2))
+    && isDigit(value.charAt(start + 4)) && isDigit(value.charAt(start + 5));
+}
+
+function isDigit(value: string | undefined): boolean {
+  return value !== undefined && value >= '0' && value <= '9';
 }

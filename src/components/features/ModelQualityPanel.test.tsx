@@ -35,6 +35,15 @@ const publishedReport = {
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe('ModelQualityPanel', () => {
+  it('объявляет загрузку и не показывает метрики, пока отчёт не получен', () => {
+    modelEvaluation.fetchModelEvaluation.mockImplementation(() => new Promise(() => undefined));
+
+    render(<ModelQualityPanel />);
+
+    expect(screen.getByRole('status')).toHaveTextContent('Загрузка отчёта об оценке модели…');
+    expect(screen.queryByRole('table', { name: 'Метрики качества модели' })).not.toBeInTheDocument();
+  });
+
   it('показывает в отдельных столбцах метрики валидации и теста, пороги и размеры выборок', async () => {
     modelEvaluation.fetchModelEvaluation.mockResolvedValue({ status: 'ready', evaluation: publishedReport });
 

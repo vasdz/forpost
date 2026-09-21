@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const backend = vi.hoisted(() => ({ proxyForpostApi: vi.fn() }));
 vi.mock('@/server/forpostApi', () => backend);
 
+const DEMO_ASSERTION = `demo.${'x'.repeat(40)}.${'y'.repeat(40)}`;
+
 import { GET as getAvailability } from './availability/route';
 import { GET as getModelEvaluation } from './model-evaluation/route';
 import { GET as getPredictions } from './predictions/route';
@@ -20,14 +22,36 @@ describe('same-origin backend routes', () => {
     );
   });
 
-  it('проксирует чтение прогнозов, оценки модели и доступности только на фиксированные пути', async () => {
+  it('проксирует чтение прогнозов, оценки с пользовательской demo-сессией и доступности только на фиксированные пути', async () => {
     await getPredictions();
-    await getModelEvaluation();
+    await getModelEvaluation(new Request('http://127.0.0.1/api/model-evaluation', {
+      headers: { cookie: `forpost_demo_session=${DEMO_ASSERTION}; forpost_csrf=${'c'.repeat(40)}` },
+    }));
     await getAvailability();
 
     expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(1, '/api/predictions');
-    expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(2, '/api/model-evaluation');
+    expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(2, '/api/model-evaluation', { credential: DEMO_ASSERTION });
     expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(3, '/api/availability');
+  });
+
+  it('не подставляет центральный service token для анонимного чтения отчёта', async () => {
+    const response = await getModelEvaluation(new Request('http://127.0.0.1/api/model-evaluation', {
+      headers: { authorization: `Bearer ${'service-token'.repeat(4)}` },
+    }));
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: 'Требуется доверенная пользовательская сессия' });
+    expect(backend.proxyForpostApi).not.toHaveBeenCalled();
+  });
+
+  it('передаёт valid demo-утверждение как scoped credential и сохраняет 503 backend', async () => {
+    backend.proxyForpostApi.mockResolvedValue(Response.json({ status: 'unavailable' }, { status: 503 }));
+    const response = await getModelEvaluation(new Request('http://127.0.0.1/api/model-evaluation', {
+      headers: { cookie: `forpost_demo_session=${DEMO_ASSERTION}; forpost_csrf=${'c'.repeat(40)}` },
+    }));
+
+    expect(response.status).toBe(503);
+    expect(backend.proxyForpostApi).toHaveBeenCalledWith('/api/model-evaluation', { credential: DEMO_ASSERTION });
   });
 
   it('не принимает решение без доверенной пользовательской сессии', async () => {
