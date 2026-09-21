@@ -106,6 +106,32 @@ describe('fetchModelEvaluation', () => {
     await expect(fetchModelEvaluation(fetcher as typeof fetch)).resolves.toEqual({ status: 'unavailable' });
   });
 
+  it.each([
+    '2026-02-31T12:00:00Z',
+    '2026-04-31T12:00:00Z',
+    '2026-13-01T12:00:00Z',
+    '2026-09-21T24:00:00Z',
+    '2026-09-21T23:60:00Z',
+    '2026-09-21T23:59:60Z',
+    '2026-09-21T12:00:00+24:00',
+    '2026-09-21T12:00:00+03:60',
+  ])('отклоняет календарно невозможный created_at: %s', async (createdAt) => {
+    const fetcher = vi.fn(async () => jsonResponse({ ...validReport, created_at: createdAt }));
+
+    await expect(fetchModelEvaluation(fetcher as typeof fetch)).resolves.toEqual({ status: 'unavailable' });
+  });
+
+  it('принимает високосную дату с дробными секундами', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({
+      ...validReport,
+      created_at: '2024-02-29T23:59:59.123456+03:00',
+    }));
+
+    await expect(fetchModelEvaluation(fetcher as typeof fetch)).resolves.toMatchObject({
+      status: 'ready', evaluation: { createdAt: '2024-02-29T23:59:59.123456+03:00' },
+    });
+  });
+
   it('отклоняет report с нарушенным инвариантом опубликованного доказательства', async () => {
     const fetcher = vi.fn(async () => jsonResponse({
       ...validReport,

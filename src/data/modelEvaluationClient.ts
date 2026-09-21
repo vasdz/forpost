@@ -219,9 +219,20 @@ function isTimestampWithTimezone(value: unknown): value is string {
   const fractionalLength = timezoneStart - 19;
   if (fractionalLength !== 0 && (fractionalLength < 2 || fractionalLength > 10 || value[19] !== '.')) return false;
   const digitPositions = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
-  return value[4] === '-' && value[7] === '-' && value[13] === ':' && value[16] === ':'
+  if (!(value[4] === '-' && value[7] === '-' && value[13] === ':' && value[16] === ':'
     && digitPositions.every((position) => isDigit(value.charAt(position)))
-    && [...value.slice(20, timezoneStart)].every(isDigit)
+    && [...value.slice(20, timezoneStart)].every(isDigit))) return false;
+  const year = numericPart(value, 0, 4);
+  const month = numericPart(value, 5, 7);
+  const day = numericPart(value, 8, 10);
+  const hour = numericPart(value, 11, 13);
+  const minute = numericPart(value, 14, 16);
+  const second = numericPart(value, 17, 19);
+  const timezoneHour = value.endsWith('Z') ? 0 : numericPart(value, timezoneStart + 1, timezoneStart + 3);
+  const timezoneMinute = value.endsWith('Z') ? 0 : numericPart(value, timezoneStart + 4, timezoneStart + 6);
+  return year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month)
+    && hour <= 23 && minute <= 59 && second <= 59
+    && timezoneHour <= 23 && timezoneMinute <= 59
     && Number.isFinite(Date.parse(value));
 }
 
@@ -233,4 +244,13 @@ function isTimezoneOffset(value: string, start: number): boolean {
 
 function isDigit(value: string | undefined): boolean {
   return value !== undefined && value >= '0' && value <= '9';
+}
+
+function numericPart(value: string, start: number, end: number): number {
+  return Number(value.slice(start, end));
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
