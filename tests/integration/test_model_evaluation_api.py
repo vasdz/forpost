@@ -39,7 +39,9 @@ def test_evaluation_requires_authentication_before_reading(client, evaluation_ro
     assert response.json()["detail"]["code"] == "UNAUTHENTICATED"
 
 
-def test_evaluation_uses_demo_subject_permissions_instead_of_service_token(client, evaluation_route, monkeypatch):
+def test_evaluation_uses_demo_subject_permissions_instead_of_service_token(
+    client, evaluation_route, monkeypatch
+):
     """Demo-утверждение не должно заменяться центральным BFF-токеном."""
     secret = "d" * 48
     monkeypatch.setenv("FORPOST_DEMO_MODE", "1")
@@ -53,7 +55,9 @@ def test_evaluation_uses_demo_subject_permissions_instead_of_service_token(clien
     )
     assertion = issue_demo_assertion(subject, secret)
 
-    response = client.get("/api/model-evaluation", headers={"Authorization": f"Bearer demo.{assertion}"})
+    response = client.get(
+        "/api/model-evaluation", headers={"Authorization": f"Bearer demo.{assertion}"}
+    )
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Недостаточно прав для выполнения операции"

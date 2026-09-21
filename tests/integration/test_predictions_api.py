@@ -1,7 +1,9 @@
 """Интеграционный контракт чтения экспортов ML-прогнозов."""
 
 import hashlib
+import importlib.util
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -72,6 +74,23 @@ def write_prediction_export(root, case: str, version: str, content: str):
         encoding="utf-8",
     )
     return export_path
+
+
+def test_default_models_path_serves_exports_from_repository_root(tmp_path):
+    """Смещение корня на каталог выше репозитория скрывает валидный ML-релиз."""
+    root = tmp_path / "repository"
+    route_path = root / "apps/api/src/forpost_api/routes/predictions.py"
+    route_path.parent.mkdir(parents=True)
+    shutil.copyfile(predictions.__file__, route_path)
+    write_prediction_export(root / "ml/models", "sensor_failure", "v1", prediction_json("local"))
+    spec = importlib.util.spec_from_file_location("predictions_path_regression", route_path)
+    route = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(route)
+
+    exported, count = route.load_exported_predictions()
+
+    assert count == 1
+    assert [item.id for item in exported] == ["local"]
 
 
 @pytest.fixture

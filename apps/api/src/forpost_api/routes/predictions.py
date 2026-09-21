@@ -29,7 +29,7 @@ router = APIRouter(tags=["Predictions"])
 Subject = Annotated[SecuritySubject, Depends(require_permission(Permission.VIEW_RISKS))]
 DecisionSubject = Annotated[SecuritySubject, Depends(get_current_human_subject)]
 PENDING_MODEL_RESPONSE = {"error": "ML модель не обучена", "status": "pending"}
-ML_MODELS_DIRECTORY = Path(__file__).resolve().parents[6] / "ml" / "models"
+ML_MODELS_DIRECTORY = Path(__file__).resolve().parents[5] / "ml" / "models"
 MODEL_VERSION_PATTERN = re.compile(r"v[1-9]\d*")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 MAX_PREDICTION_EXPORT_BYTES = 10 * 1024 * 1024
