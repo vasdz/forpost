@@ -7,12 +7,19 @@ import tempfile
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
+import numpy as np
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, model_validator
+from scipy.stats import t
 
 MAX_EVALUATION_REPORT_BYTES = 256 * 1024
 UnitMetric = Annotated[float, Field(strict=True, ge=0, le=1, allow_inf_nan=False)]
 EvaluationVersion = Annotated[str, Field(pattern=r"^v[1-9][0-9]*$", max_length=32)]
 EvaluationHorizonHours = Annotated[int, Field(strict=True, gt=0, le=8760)]
+Sha256 = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
+EvidenceString = Annotated[str, Field(strict=True, min_length=1, max_length=128)]
+ProfileName = Literal["high_precision", "balanced", "high_recall"]
+TaskSemantics = Literal["risk_of_telemetry_silence_within_horizon"]
+LIBRARY_NAMES = frozenset({"numpy", "pandas", "scikit-learn", "skops", "catboost", "lightgbm"})
 ReasonCode = Literal[
     "configuration_invalid",
     "source_unavailable",
@@ -43,6 +50,137 @@ class EvaluationMetrics(ExactModel):
     expected_calibration_error: UnitMetric
     alert_rate: UnitMetric
 
+    def __getitem__(self, key: str) -> float:
+        if key not in type(self).model_fields:
+            raise KeyError(key)
+        return getattr(self, key)
+
+
+class FoldEvidence(ExactModel):
+    index: Annotated[int, Field(strict=True, ge=1, le=20)]
+    train_rows: Annotated[int, Field(strict=True, gt=0)]
+    calibration_rows: Annotated[int, Field(strict=True, gt=0)]
+    validation_rows: Annotated[int, Field(strict=True, gt=0)]
+    threshold: UnitMetric
+    metrics: EvaluationMetrics
+
+
+class OperatingProfile(ExactModel):
+    threshold: UnitMetric
+    precision: UnitMetric
+    recall: UnitMetric
+    alert_rate: UnitMetric
+
+
+class ConfidenceInterval(ExactModel):
+    lower: UnitMetric
+    upper: UnitMetric
+    level: Literal[0.95]
+    method: Literal["student_t_across_rolling_folds"]
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> Self:
+        if self.lower > self.upper:
+            raise ValueError("Границы интервала перепутаны")
+        return self
+
+
+class ValidationEvidence(ExactModel):
+    task_semantics: TaskSemantics
+    feature_schema_version: EvidenceString | None
+    config_sha256: Sha256 | None
+    library_versions: dict[EvidenceString, EvidenceString]
+    rolling_folds: tuple[FoldEvidence, ...]
+    operating_profiles: dict[ProfileName, OperatingProfile]
+    validation_confidence_intervals: dict[str, ConfidenceInterval]
+
+    def require_complete(
+        self, threshold: float, metrics: EvaluationMetrics, validation_rows: int
+    ) -> None:
+        if (
+            self.feature_schema_version is None
+            or self.config_sha256 is None
+            or set(self.library_versions) != LIBRARY_NAMES
+            or len(self.rolling_folds) < 3
+            or tuple(fold.index for fold in self.rolling_folds)
+            != tuple(range(1, len(self.rolling_folds) + 1))
+            or set(self.operating_profiles) != {"high_precision", "balanced", "high_recall"}
+            or set(self.validation_confidence_intervals) != set(EvaluationMetrics.model_fields)
+        ):
+            raise ValueError("Неполные validation-доказательства")
+        if self.operating_profiles["balanced"].threshold != threshold or any(
+            fold.threshold != threshold for fold in self.rolling_folds
+        ):
+            raise ValueError("Рабочий порог не соответствует rolling validation")
+        if sum(fold.validation_rows for fold in self.rolling_folds) != validation_rows:
+            raise ValueError("Размер validation не соответствует rolling folds")
+        for name in EvaluationMetrics.model_fields:
+            mean = float(np.mean([fold.metrics[name] for fold in self.rolling_folds]))
+            interval = self.validation_confidence_intervals[name]
+            if not np.isclose(metrics[name], mean, rtol=1e-10, atol=1e-12) or not (
+                interval.lower <= mean <= interval.upper
+            ):
+                raise ValueError("Агрегат или интервал не соответствует rolling folds")
+        profile = self.operating_profiles["balanced"]
+        if any(
+            not np.isclose(getattr(profile, name), metrics[name], rtol=1e-10, atol=1e-12)
+            for name in ("precision", "recall", "alert_rate")
+        ):
+            raise ValueError("Профиль balanced не соответствует validation-агрегату")
+
+
+def validation_evidence_payload(evidence) -> dict[str, object]:
+    """Агрегирует только выбранные validation folds, не читая final test.
+
+    Student-t интервалы описывают разброс среднего между зависимыми rolling folds;
+    это не индивидуальные интервалы риска и не гарантия независимой выборки.
+    """
+    folds = evidence.rolling_folds
+    sizes = evidence.rolling_fold_sizes
+    return {
+        "rolling_folds": [
+            {
+                "index": fold.fold_index,
+                **size,
+                "threshold": fold.threshold,
+                "metrics": {
+                    name: float(getattr(fold.metrics, name))
+                    for name in EvaluationMetrics.model_fields
+                },
+            }
+            for fold, size in zip(folds, sizes, strict=True)
+        ],
+        "operating_profiles": {
+            name: {
+                "threshold": profile.threshold,
+                **{
+                    metric: float(
+                        np.mean([getattr(fold.metrics, metric) for fold in profile.rolling_folds])
+                    )
+                    for metric in ("precision", "recall", "alert_rate")
+                },
+            }
+            for name, profile in evidence.operating_profiles.items()
+        },
+        "validation_confidence_intervals": {
+            name: _fold_interval([getattr(fold.metrics, name) for fold in folds])
+            for name in EvaluationMetrics.model_fields
+        }
+        if len(folds) >= 3
+        else {},
+    }
+
+
+def _fold_interval(values: list[float]) -> dict[str, object]:
+    mean = float(np.mean(values))
+    margin = float(t.ppf(0.975, len(values) - 1) * np.std(values, ddof=1) / np.sqrt(len(values)))
+    return {
+        "lower": max(0.0, mean - margin),
+        "upper": min(1.0, mean + margin),
+        "level": 0.95,
+        "method": "student_t_across_rolling_folds",
+    }
+
 
 class QualityThresholds(ExactModel):
     minimum_precision: UnitMetric
@@ -60,8 +198,8 @@ class SplitSizes(ExactModel):
     test: Annotated[int, Field(strict=True, gt=0)]
 
 
-class EvaluationReport(ExactModel):
-    format_version: Literal[1]
+class EvaluationReport(ValidationEvidence):
+    format_version: Literal[2]
     task: Literal["sensor_failure"]
     version: EvaluationVersion
     status: Literal["rejected", "published"]
@@ -84,6 +222,10 @@ class EvaluationReport(ExactModel):
             "hist_gradient_boosting_sigmoid",
             "logistic_regression_isotonic",
             "logistic_regression_sigmoid",
+            "catboost_isotonic",
+            "catboost_sigmoid",
+            "lightgbm_isotonic",
+            "lightgbm_sigmoid",
         ]
         | None
     )
@@ -107,6 +249,10 @@ class EvaluationReport(ExactModel):
             )
         ):
             raise ValueError("Опубликованный отчёт требует полных доказательств")
+        if self.status == "published":
+            self.require_complete(
+                self.threshold, self.validation_metrics, self.split_sizes.validation
+            )
         return self
 
 

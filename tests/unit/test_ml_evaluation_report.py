@@ -31,7 +31,7 @@ def report_payload(status="rejected"):
         "alert_rate": 0.2,
     }
     return {
-        "format_version": 1,
+        "format_version": 2,
         "task": "sensor_failure",
         "version": "v1",
         "status": status,
@@ -48,12 +48,48 @@ def report_payload(status="rejected"):
             "maximum_brier_score": 0.25,
             "minimum_baseline_pr_auc_delta": 0.01,
         },
-        "split_sizes": {"fit": 100, "calibration": 30, "validation": 40, "test": 40},
+        "split_sizes": {"fit": 100, "calibration": 30, "validation": 120, "test": 40},
         "baseline_validation_pr_auc": 0.25,
         "validation_metrics": metrics if status == "published" else None,
         "test_metrics": metrics if status == "published" else None,
         "threshold": 0.6 if status == "published" else None,
         "champion_name": "extra_trees_isotonic" if status == "published" else None,
+        "task_semantics": "risk_of_telemetry_silence_within_horizon",
+        "feature_schema_version": "5",
+        "config_sha256": "a" * 64,
+        "library_versions": dict.fromkeys(
+            ("numpy", "pandas", "scikit-learn", "skops", "catboost", "lightgbm"), "1.0"
+        ),
+        "rolling_folds": [
+            {
+                "index": index,
+                "train_rows": 100,
+                "calibration_rows": 30,
+                "validation_rows": 40,
+                "threshold": 0.6,
+                "metrics": dict(metrics),
+            }
+            for index in range(1, 4)
+        ]
+        if status == "published"
+        else [],
+        "operating_profiles": {
+            name: {"threshold": 0.6, "precision": 0.8, "recall": 0.7, "alert_rate": 0.2}
+            for name in ("high_precision", "balanced", "high_recall")
+        }
+        if status == "published"
+        else {},
+        "validation_confidence_intervals": {
+            name: {
+                "lower": 0.0,
+                "upper": 1.0,
+                "level": 0.95,
+                "method": "student_t_across_rolling_folds",
+            }
+            for name in metrics
+        }
+        if status == "published"
+        else {},
     }
 
 
@@ -112,6 +148,62 @@ def test_published_report_requires_completed_evidence(reports, field):
     payload[field] = None
     with pytest.raises(ValidationError):
         reports.EvaluationReport.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("rolling_folds", []),
+        ("operating_profiles", {}),
+        ("validation_confidence_intervals", {}),
+        ("config_sha256", None),
+        ("feature_schema_version", None),
+        ("library_versions", {}),
+    ],
+)
+def test_published_v2_report_requires_rolling_and_schema_evidence(reports, field, value):
+    payload = report_payload("published")
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        reports.EvaluationReport.model_validate(payload)
+
+
+def test_report_rejects_duplicate_folds_and_inconsistent_balanced_threshold(reports):
+    payload = report_payload("published")
+    payload["rolling_folds"][1]["index"] = 1
+    with pytest.raises(ValidationError):
+        reports.EvaluationReport.model_validate(payload)
+    payload = report_payload("published")
+    payload["operating_profiles"]["balanced"]["threshold"] = 0.9
+    with pytest.raises(ValidationError):
+        reports.EvaluationReport.model_validate(payload)
+
+
+def test_validation_intervals_describe_fold_mean_without_reading_final_test(reports):
+    folds = tuple(
+        SimpleNamespace(
+            fold_index=index,
+            threshold=0.6,
+            metrics=SimpleNamespace(**dict.fromkeys(reports.EvaluationMetrics.model_fields, value)),
+        )
+        for index, value in enumerate((0.6, 0.7, 0.8), start=1)
+    )
+    evidence = SimpleNamespace(
+        rolling_folds=folds,
+        rolling_fold_sizes=tuple(
+            {"train_rows": 100, "calibration_rows": 20, "validation_rows": 40} for _ in folds
+        ),
+        operating_profiles={
+            name: SimpleNamespace(threshold=0.6, rolling_folds=folds)
+            for name in ("high_precision", "balanced", "high_recall")
+        },
+    )
+    payload = reports.validation_evidence_payload(evidence)
+    interval = payload["validation_confidence_intervals"]["precision"]
+    assert interval["lower"] == pytest.approx(0.4515862, abs=1e-6)
+    assert interval["upper"] == pytest.approx(0.9484138, abs=1e-6)
+    assert interval["level"] == 0.95
+    assert "test_metrics" not in payload
 
 
 @pytest.mark.parametrize("value", [0, -1, 8761, 1.5, "24", True, float("inf")])
@@ -241,6 +333,13 @@ def test_training_without_observer_retains_identical_result():
     assert observed.threshold == unobserved.threshold
     assert observed.test_metrics == unobserved.test_metrics
     assert evidence.validation_metrics == unobserved.validation_metrics
+    assert evidence.rolling_folds == observed.rolling_folds
+    assert evidence.operating_profiles == observed.operating_profiles
+    assert len(observed.rolling_fold_sizes) == 3
+    assert observed.rolling_fold_sizes[0]["validation_rows"] == 16
+    assert (
+        observed.rolling_fold_sizes[0]["train_rows"] < observed.rolling_fold_sizes[2]["train_rows"]
+    )
 
 
 @pytest.fixture
@@ -307,6 +406,17 @@ def test_command_writes_published_report_only_after_real_release(command, report
     card_path = arguments.registry_root / "sensor_failure" / "v1" / "model-card.json"
     card = json.loads(card_path.read_text(encoding="utf-8"))
     assert report.test_metrics.model_dump() == card["test_metrics"]
+    assert report.format_version == card["format_version"] == 2
+    assert (
+        report.task_semantics
+        == card["task_semantics"]
+        == "risk_of_telemetry_silence_within_horizon"
+    )
+    assert len(report.rolling_folds) == 3
+    assert set(report.operating_profiles) == {"high_precision", "balanced", "high_recall"}
+    assert report.model_dump(mode="json")["rolling_folds"] == card["rolling_folds"]
+    assert report.model_dump(mode="json")["operating_profiles"] == card["operating_profiles"]
+    assert set(report.validation_confidence_intervals) == set(card["validation_metrics"])
 
 
 def test_command_rejects_validation_without_release_or_test_evidence(command, reports):
@@ -392,7 +502,7 @@ def test_command_late_release_failure_does_not_publish_test_evidence(
 ):
     module, arguments, _config = command
 
-    def release_failure(*_args):
+    def release_failure(*_args, **_kwargs):
         assert not arguments.evaluation_report.exists()
         raise module.ModelUnavailableError("C:/private-registry/secret.skops")
 
@@ -404,6 +514,23 @@ def test_command_late_release_failure_does_not_publish_test_evidence(
     assert report.validation_metrics is not None
     assert report.test_metrics is None
     assert "private-registry" not in capsys.readouterr().err
+
+
+def test_missing_library_metadata_produces_sanitized_training_rejection(
+    command, reports, monkeypatch, capsys
+):
+    module, arguments, _config = command
+
+    def missing(_package):
+        raise module.importlib.metadata.PackageNotFoundError("C:/private-library/secret")
+
+    monkeypatch.setattr(module.importlib.metadata, "version", missing)
+    assert module.main() == 1
+    report = reports.load_evaluation_report(arguments.evaluation_report)
+    assert report.reason_code == "training_unavailable"
+    assert report.test_metrics is None
+    assert not arguments.registry_root.exists()
+    assert "private-library" not in capsys.readouterr().err
 
 
 def test_reused_evidence_does_not_retain_previous_run_when_training_fails():

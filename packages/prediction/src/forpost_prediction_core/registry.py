@@ -7,14 +7,33 @@ import json
 import re
 import shutil
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal, Self
 
+import numpy as np
 import skops.io as skops_io
+from pydantic import AwareDatetime, Field, model_validator
+from sklearn.calibration import CalibratedClassifierCV, _SigmoidCalibration
+from sklearn.compose import ColumnTransformer
+from sklearn.frozen import FrozenEstimator
+from sklearn.isotonic import IsotonicRegression
+from sklearn.pipeline import Pipeline
 
+from forpost_prediction_core.candidates import NativeBoosterClassifier, assert_prediction_parity
 from forpost_prediction_core.capabilities import EvidenceTier, PredictionTask
+from forpost_prediction_core.evaluation_report import (
+    EvaluationMetrics,
+    EvaluationVersion,
+    EvidenceString,
+    Sha256,
+    ValidationEvidence,
+)
+
+MAX_MODEL_FILE_BYTES = 256 * 1024 * 1024
+MAX_METADATA_BYTES = 256 * 1024
+PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 
 
 class ModelUnavailableError(ValueError):
@@ -32,35 +51,49 @@ class ModelMetadata:
     created_at: datetime
 
 
-@dataclass(frozen=True)
-class ModelCard:
+class ModelCard(ValidationEvidence):
     """Проверяемое описание качества и происхождения локальной модели."""
 
     task: PredictionTask
-    version: str
-    feature_schema_version: str
+    format_version: Literal[2]
+    model_format: Literal["skops", "catboost_cbm", "lightgbm_text"]
+    version: EvaluationVersion
+    feature_schema_version: EvidenceString
     evidence_tier: EvidenceTier
-    calibrated: bool
-    created_at: datetime
-    threshold: float
-    feature_columns: tuple[str, ...]
-    validation_metrics: dict[str, float]
-    test_metrics: dict[str, float]
-    label_strategy: str
-    horizon_hours: int
-    purge_hours: int
-    config_sha256: str
-    library_versions: dict[str, str]
-    dataset_start_at: datetime
-    dataset_end_at: datetime
-    source_event_count: int
-    skipped_source_event_count: int
-    history_truncated_before: bool
-    fit_row_count: int
-    calibration_row_count: int
-    validation_row_count: int
-    test_row_count: int
-    inference_duration_seconds: float
+    calibrated: Annotated[bool, Field(strict=True)]
+    created_at: AwareDatetime
+    threshold: Annotated[float, Field(strict=True, gt=0, lt=1)]
+    feature_columns: tuple[EvidenceString, ...]
+    validation_metrics: EvaluationMetrics
+    test_metrics: EvaluationMetrics
+    label_strategy: Literal["silence_horizon_proxy"]
+    horizon_hours: Annotated[int, Field(strict=True, ge=24, le=8760)]
+    purge_hours: PositiveInt
+    config_sha256: Sha256
+    dataset_start_at: AwareDatetime
+    dataset_end_at: AwareDatetime
+    source_event_count: PositiveInt
+    skipped_source_event_count: Annotated[int, Field(strict=True, ge=0)]
+    history_truncated_before: Annotated[bool, Field(strict=True)]
+    fit_row_count: PositiveInt
+    calibration_row_count: PositiveInt
+    validation_row_count: PositiveInt
+    test_row_count: PositiveInt
+    inference_duration_seconds: Annotated[float, Field(strict=True, ge=0, lt=300)]
+
+    @model_validator(mode="after")
+    def validate_release_evidence(self) -> Self:
+        self.require_complete(self.threshold, self.validation_metrics, self.validation_row_count)
+        if (
+            self.task != PredictionTask.SENSOR_FAILURE
+            or not self.calibrated
+            or not self.feature_columns
+            or len(set(self.feature_columns)) != len(self.feature_columns)
+            or self.purge_hours < self.horizon_hours
+            or self.dataset_start_at >= self.dataset_end_at
+        ):
+            raise ValueError("Model card не соответствует контракту задачи")
+        return self
 
 
 @dataclass(frozen=True)
@@ -71,20 +104,11 @@ class ModelBundle:
     card: ModelCard
 
 
-_VERSION_PATTERN = re.compile(r"v[1-9]\d*")
-_BUNDLE_FILES = ("model.skops", "model-card.json")
-_REQUIRED_METRIC_KEYS = frozenset(
-    {
-        "precision",
-        "recall",
-        "f1",
-        "pr_auc",
-        "roc_auc",
-        "brier_score",
-        "expected_calibration_error",
-        "alert_rate",
-    }
-)
+_FORMAT_FILES = {
+    "skops": ("model.skops", "model-card.json"),
+    "catboost_cbm": ("model.cbm", "preprocess.skops", "calibration.skops", "model-card.json"),
+    "lightgbm_text": ("model.txt", "preprocess.skops", "calibration.skops", "model-card.json"),
+}
 _ALLOWED_SKOPS_TYPES = frozenset(
     {
         "numpy.dtype",
@@ -115,9 +139,11 @@ def validate_model_metadata(
         raise ModelUnavailableError("У метаданных модели отсутствует часовой пояс")
 
 
-def publish_model_bundle(root: Path, model: Any, card: ModelCard) -> Path:
+def publish_model_bundle(root: Path, model: Any, card: ModelCard, *, parity_features=None) -> Path:
     """Атомарно публикует безопасный локальный bundle с manifest хэшей."""
-    return _publish_version(root, model, card, prediction_payload=None)
+    return _publish_version(
+        root, model, card, prediction_payload=None, parity_features=parity_features
+    )
 
 
 def publish_model_release(
@@ -125,9 +151,13 @@ def publish_model_release(
     model: Any,
     card: ModelCard,
     prediction_payload: dict[str, object],
+    *,
+    parity_features=None,
 ) -> Path:
     """Атомарно публикует модель, card, прогнозы и оба manifest одной версией."""
-    return _publish_version(root, model, card, prediction_payload=prediction_payload)
+    return _publish_version(
+        root, model, card, prediction_payload=prediction_payload, parity_features=parity_features
+    )
 
 
 def _publish_version(
@@ -136,8 +166,13 @@ def _publish_version(
     card: ModelCard,
     *,
     prediction_payload: dict[str, object] | None,
+    parity_features,
 ) -> Path:
     _validate_card(card)
+    if parity_features is None or len(parity_features) == 0:
+        raise ModelUnavailableError("Для публикации необходима проверка roundtrip вероятностей")
+    if tuple(parity_features.columns) != card.feature_columns:
+        raise ModelUnavailableError("Проверочные признаки не соответствуют model card")
     if prediction_payload is not None:
         _validate_prediction_payload(prediction_payload, card)
     registry_root = Path(root).resolve(strict=False)
@@ -150,14 +185,11 @@ def _publish_version(
     temporary = task_root / f".{card.version}-{uuid.uuid4().hex}.tmp"
     try:
         temporary.mkdir(parents=False)
-        skops_io.dump(model, temporary / "model.skops")
+        _save_model(temporary, model, card)
         (temporary / "model-card.json").write_text(
             json.dumps(_card_to_dict(card), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
         )
-        untrusted = skops_io.get_untrusted_types(file=temporary / "model.skops")
-        if not set(untrusted) <= _ALLOWED_SKOPS_TYPES:
-            raise ModelUnavailableError("Артефакт содержит недоверенные типы модели")
         if prediction_payload is not None:
             encoded = (
                 json.dumps(
@@ -186,16 +218,28 @@ def _publish_version(
                 encoding="utf-8",
             )
         manifest = {
-            "format_version": 1,
+            "format_version": 2,
             "task": card.task.value,
             "version": card.version,
-            "files": {name: _sha256(temporary / name) for name in _BUNDLE_FILES},
+            "model_format": card.model_format,
+            "feature_schema_version": card.feature_schema_version,
+            "files": {name: _sha256(temporary / name) for name in _FORMAT_FILES[card.model_format]},
         }
         (temporary / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
         )
+        restored = load_model_bundle(
+            temporary,
+            expected_task=card.task,
+            expected_feature_schema_version=card.feature_schema_version,
+            maximum_evidence_tier=card.evidence_tier,
+        )
+        assert_prediction_parity(model, restored.model, parity_features)
         temporary.replace(target)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise ModelUnavailableError("Модель не прошла безопасную публикацию") from None
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
@@ -231,210 +275,214 @@ def load_model_bundle(
     expected_feature_schema_version: str,
     maximum_evidence_tier: EvidenceTier,
 ) -> ModelBundle:
-    """Проверяет manifest, card и типы skops до загрузки модели."""
-    unresolved_bundle = Path(bundle_path)
-    if unresolved_bundle.is_symlink():
-        raise ModelUnavailableError("Каталог модели не прошёл проверку")
-    bundle = unresolved_bundle.resolve(strict=True)
-    if not bundle.is_dir():
-        raise ModelUnavailableError("Каталог модели не прошёл проверку")
-    manifest = _read_json(bundle / "manifest.json")
-    if manifest.get("format_version") != 1:
-        raise ModelUnavailableError("Неизвестная версия manifest модели")
-    files = manifest.get("files")
-    if not isinstance(files, dict) or set(files) != set(_BUNDLE_FILES):
-        raise ModelUnavailableError("Manifest модели содержит неизвестный набор файлов")
-    for name in _BUNDLE_FILES:
-        path = _checked_bundle_file(bundle, name)
-        if not isinstance(files[name], str) or _sha256(path) != files[name]:
-            raise ModelUnavailableError("Нарушена целостность артефактов модели")
+    """Проверяет ограниченные файлы, точный manifest и card до десериализации."""
+    try:
+        unresolved = Path(bundle_path)
+        if any(path.is_symlink() for path in (unresolved, *unresolved.parents)):
+            raise ModelUnavailableError("Каталог модели не прошёл проверку")
+        bundle = unresolved.resolve(strict=True)
+        if not bundle.is_dir():
+            raise ModelUnavailableError("Каталог модели не прошёл проверку")
+        manifest = _read_json(_checked_bundle_file(bundle, "manifest.json"))
+        if (
+            set(manifest)
+            != {
+                "format_version",
+                "task",
+                "version",
+                "model_format",
+                "feature_schema_version",
+                "files",
+            }
+            or type(manifest["format_version"]) is not int
+            or manifest["format_version"] != 2
+        ):
+            raise ModelUnavailableError("Неизвестная схема manifest модели")
+        model_format = manifest["model_format"]
+        if not isinstance(model_format, str) or model_format not in _FORMAT_FILES:
+            raise ModelUnavailableError("Неизвестный формат модели")
+        files = manifest["files"]
+        if not isinstance(files, dict) or set(files) != set(_FORMAT_FILES[model_format]):
+            raise ModelUnavailableError("Manifest модели содержит неизвестный набор файлов")
+        for name, digest in files.items():
+            path = _checked_bundle_file(bundle, name)
+            if (
+                not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or _sha256(path) != digest
+            ):
+                raise ModelUnavailableError("Нарушена целостность артефактов модели")
+        card = _card_from_dict(_read_json(bundle / "model-card.json"))
+        validate_model_metadata(
+            ModelMetadata(
+                card.task,
+                card.version,
+                card.feature_schema_version,
+                card.calibrated,
+                card.created_at,
+            ),
+            expected_task=expected_task,
+            expected_feature_schema_version=expected_feature_schema_version,
+        )
+        if card.evidence_tier is not maximum_evidence_tier:
+            raise ModelUnavailableError(
+                "Уровень доказательности модели не соответствует источникам"
+            )
+        if any(
+            manifest[key] != value
+            for key, value in {
+                "task": card.task.value,
+                "version": card.version,
+                "model_format": card.model_format,
+                "feature_schema_version": card.feature_schema_version,
+            }.items()
+        ):
+            raise ModelUnavailableError("Manifest модели не соответствует model card")
+        model = _load_model(bundle, card)
+        _check_model_schema(model, card)
+        return ModelBundle(model=model, card=card)
+    except ModelUnavailableError:
+        raise
+    except Exception:
+        raise ModelUnavailableError("Артефакт модели не прошёл безопасную загрузку") from None
 
-    card = _card_from_dict(_read_json(bundle / "model-card.json"))
-    _validate_card(card)
-    validate_model_metadata(
-        ModelMetadata(
-            task=card.task,
-            version=card.version,
-            feature_schema_version=card.feature_schema_version,
-            calibrated=card.calibrated,
-            created_at=card.created_at,
-        ),
-        expected_task=expected_task,
-        expected_feature_schema_version=expected_feature_schema_version,
-    )
-    if card.evidence_tier is not maximum_evidence_tier:
-        raise ModelUnavailableError("Уровень доказательности модели не соответствует источникам")
-    if manifest.get("task") != card.task.value or manifest.get("version") != card.version:
-        raise ModelUnavailableError("Manifest модели не соответствует model card")
 
-    model_path = bundle / "model.skops"
-    untrusted = skops_io.get_untrusted_types(file=model_path)
+@dataclass(frozen=True)
+class _NativeCalibratedModel:
+    """Явная композиция проверенных компонентов, не сериализуемый Python-объект."""
+
+    preprocess: Any
+    classifier: NativeBoosterClassifier
+    calibrator: Any
+
+    @property
+    def feature_names_in_(self):
+        return self.preprocess.feature_names_in_
+
+    def predict_proba(self, features):
+        transformed = self.preprocess.transform(features)
+        raw = self.classifier.predict_proba(transformed)[:, 1]
+        probabilities = self.calibrator.predict(raw)
+        return np.column_stack((1 - probabilities, probabilities))
+
+    def predict(self, features):
+        return (self.predict_proba(features)[:, 1] >= 0.5).astype(int)
+
+
+def _calibrated_parts(model):
+    if (
+        type(model) is not CalibratedClassifierCV
+        or len(model.calibrated_classifiers_) != 1
+        or not np.array_equal(model.classes_, [0, 1])
+    ):
+        raise ModelUnavailableError("Требуется одна калиброванная бинарная модель")
+    calibrated = model.calibrated_classifiers_[0]
+    if len(calibrated.calibrators) != 1 or type(calibrated.calibrators[0]) not in {
+        IsotonicRegression,
+        _SigmoidCalibration,
+    }:
+        raise ModelUnavailableError("Неизвестная калибровка модели")
+    estimator = calibrated.estimator
+    if type(estimator) is FrozenEstimator:
+        estimator = estimator.estimator
+    return estimator, calibrated.calibrators[0]
+
+
+def _check_model_schema(model, card):
+    names = getattr(model, "feature_names_in_", None)
+    if names is None or tuple(names) != card.feature_columns:
+        raise ModelUnavailableError("Схема признаков модели не соответствует model card")
+
+
+def _save_model(bundle, model, card):
+    _check_model_schema(model, card)
+    estimator, calibrator = _calibrated_parts(model)
+    if card.model_format == "skops":
+        skops_io.dump(model, bundle / "model.skops")
+        return
+    if type(estimator) is not Pipeline or tuple(estimator.named_steps) != (
+        "preprocess",
+        "classifier",
+    ):
+        raise ModelUnavailableError("Нативный бустер требует явный preprocessing и calibration")
+    preprocess, classifier = estimator.named_steps.values()
+    backend = {"catboost_cbm": "catboost", "lightgbm_text": "lightgbm"}[card.model_format]
+    if (
+        type(preprocess) is not ColumnTransformer
+        or type(classifier) is not NativeBoosterClassifier
+        or classifier.backend != backend
+    ):
+        raise ModelUnavailableError("Нативный pipeline не соответствует формату модели")
+    classifier.save_native(bundle / _FORMAT_FILES[card.model_format][0])
+    skops_io.dump(preprocess, bundle / "preprocess.skops")
+    skops_io.dump(calibrator, bundle / "calibration.skops")
+
+
+def _safe_skops(path):
+    untrusted = skops_io.get_untrusted_types(file=path)
     if not set(untrusted) <= _ALLOWED_SKOPS_TYPES:
         raise ModelUnavailableError("Артефакт содержит недоверенные типы модели")
-    return ModelBundle(model=skops_io.load(model_path, trusted=untrusted), card=card)
+    return skops_io.load(path, trusted=untrusted)
+
+
+def _load_model(bundle, card):
+    if card.model_format == "skops":
+        model = _safe_skops(bundle / "model.skops")
+        _calibrated_parts(model)
+        return model
+    preprocess = _safe_skops(bundle / "preprocess.skops")
+    calibrator = _safe_skops(bundle / "calibration.skops")
+    if type(preprocess) is not ColumnTransformer or type(calibrator) not in {
+        IsotonicRegression,
+        _SigmoidCalibration,
+    }:
+        raise ModelUnavailableError("Нативный bundle содержит неизвестные компоненты")
+    classifier = NativeBoosterClassifier.load_native(
+        bundle / _FORMAT_FILES[card.model_format][0], model_format=card.model_format
+    )
+    return _NativeCalibratedModel(preprocess, classifier, calibrator)
 
 
 def _validate_card(card: ModelCard) -> None:
-    if not _VERSION_PATTERN.fullmatch(card.version):
-        raise ModelUnavailableError("Версия модели должна иметь формат vN")
-    if card.created_at.tzinfo is None or card.created_at.utcoffset() is None:
-        raise ModelUnavailableError("В model card отсутствует часовой пояс")
-    if not 0 < card.threshold < 1:
-        raise ModelUnavailableError("Рабочий порог модели должен быть от 0 до 1")
-    if not card.calibrated and card.evidence_tier in {EvidenceTier.VALIDATED, EvidenceTier.PROXY}:
-        raise ModelUnavailableError("Вероятностная модель не прошла калибровку")
-    if not card.feature_columns or len(set(card.feature_columns)) != len(card.feature_columns):
-        raise ModelUnavailableError("Model card содержит некорректную схему признаков")
-    if card.label_strategy != "silence_horizon_proxy":
-        raise ModelUnavailableError("Model card содержит неутверждённую стратегию разметки")
-    if card.horizon_hours < 24 or card.purge_hours < card.horizon_hours:
-        raise ModelUnavailableError("Model card содержит недостаточный temporal embargo")
-    if not re.fullmatch(r"[0-9a-f]{64}", card.config_sha256):
-        raise ModelUnavailableError("Model card содержит некорректный hash конфига")
-    if set(card.library_versions) != {"numpy", "pandas", "scikit-learn", "skops"}:
-        raise ModelUnavailableError("Model card не фиксирует версии ML-библиотек")
-    if any(not value for value in card.library_versions.values()):
-        raise ModelUnavailableError("Model card содержит пустую версию библиотеки")
-    if (
-        card.dataset_start_at.tzinfo is None
-        or card.dataset_end_at.tzinfo is None
-        or card.dataset_start_at >= card.dataset_end_at
-    ):
-        raise ModelUnavailableError("Model card содержит некорректный диапазон данных")
-    if (
-        card.source_event_count < 1
-        or card.skipped_source_event_count < 0
-        or type(card.history_truncated_before) is not bool
-    ):
-        raise ModelUnavailableError("Model card содержит некорректную статистику источника")
-    if any(
-        value < 1
-        for value in (
-            card.fit_row_count,
-            card.calibration_row_count,
-            card.validation_row_count,
-            card.test_row_count,
-        )
-    ):
-        raise ModelUnavailableError("Model card содержит пустую часть temporal split")
-    if not 0 <= card.inference_duration_seconds < 300:
-        raise ModelUnavailableError("Model card не подтверждает inference быстрее 5 минут")
-    for metrics in (card.validation_metrics, card.test_metrics):
-        if set(metrics) != _REQUIRED_METRIC_KEYS or any(
-            not np_is_finite_unit(value) for value in metrics.values()
-        ):
-            raise ModelUnavailableError("Model card содержит некорректные метрики")
-
-
-def np_is_finite_unit(value: object) -> bool:
-    return isinstance(value, (int, float)) and 0 <= float(value) <= 1
+    try:
+        ModelCard.model_validate(card.model_dump(mode="json"))
+    except (ValueError, TypeError, AttributeError):
+        raise ModelUnavailableError("Model card не прошёл проверку схемы") from None
 
 
 def _card_to_dict(card: ModelCard) -> dict[str, object]:
-    payload = asdict(card)
-    payload["task"] = card.task.value
-    payload["evidence_tier"] = card.evidence_tier.value
-    payload["created_at"] = card.created_at.isoformat()
-    payload["dataset_start_at"] = card.dataset_start_at.isoformat()
-    payload["dataset_end_at"] = card.dataset_end_at.isoformat()
-    payload["feature_columns"] = list(card.feature_columns)
-    return payload
+    return card.model_dump(mode="json")
 
 
 def _card_from_dict(payload: dict[str, object]) -> ModelCard:
     try:
-        allowed = {
-            "task",
-            "version",
-            "feature_schema_version",
-            "evidence_tier",
-            "calibrated",
-            "created_at",
-            "threshold",
-            "feature_columns",
-            "validation_metrics",
-            "test_metrics",
-            "label_strategy",
-            "horizon_hours",
-            "purge_hours",
-            "config_sha256",
-            "library_versions",
-            "dataset_start_at",
-            "dataset_end_at",
-            "source_event_count",
-            "skipped_source_event_count",
-            "history_truncated_before",
-            "fit_row_count",
-            "calibration_row_count",
-            "validation_row_count",
-            "test_row_count",
-            "inference_duration_seconds",
-        }
-        if set(payload) != allowed:
-            raise ValueError
-        feature_columns = payload["feature_columns"]
-        validation_metrics = payload["validation_metrics"]
-        test_metrics = payload["test_metrics"]
-        if (
-            not isinstance(feature_columns, list)
-            or not all(isinstance(item, str) for item in feature_columns)
-            or not isinstance(validation_metrics, dict)
-            or not isinstance(test_metrics, dict)
-            or not isinstance(payload["library_versions"], dict)
-        ):
-            raise ValueError
-        return ModelCard(
-            task=PredictionTask(str(payload["task"])),
-            version=str(payload["version"]),
-            feature_schema_version=str(payload["feature_schema_version"]),
-            evidence_tier=EvidenceTier(str(payload["evidence_tier"])),
-            calibrated=payload["calibrated"] is True,
-            created_at=datetime.fromisoformat(str(payload["created_at"])),
-            threshold=float(payload["threshold"]),
-            feature_columns=tuple(feature_columns),
-            validation_metrics={
-                str(key): float(value) for key, value in validation_metrics.items()
-            },
-            test_metrics={str(key): float(value) for key, value in test_metrics.items()},
-            label_strategy=str(payload["label_strategy"]),
-            horizon_hours=int(payload["horizon_hours"]),
-            purge_hours=int(payload["purge_hours"]),
-            config_sha256=str(payload["config_sha256"]),
-            library_versions={
-                str(key): str(value) for key, value in payload["library_versions"].items()
-            },
-            dataset_start_at=datetime.fromisoformat(str(payload["dataset_start_at"])),
-            dataset_end_at=datetime.fromisoformat(str(payload["dataset_end_at"])),
-            source_event_count=int(payload["source_event_count"]),
-            skipped_source_event_count=int(payload["skipped_source_event_count"]),
-            history_truncated_before=payload["history_truncated_before"],
-            fit_row_count=int(payload["fit_row_count"]),
-            calibration_row_count=int(payload["calibration_row_count"]),
-            validation_row_count=int(payload["validation_row_count"]),
-            test_row_count=int(payload["test_row_count"]),
-            inference_duration_seconds=float(payload["inference_duration_seconds"]),
-        )
-    except (TypeError, ValueError, KeyError) as error:
-        raise ModelUnavailableError("Model card не прошёл проверку схемы") from error
+        return ModelCard.model_validate(payload)
+    except (ValueError, TypeError):
+        raise ModelUnavailableError("Model card не прошёл проверку схемы") from None
 
 
 def _read_json(path: Path) -> dict[str, object]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ModelUnavailableError("Артефакт модели не удалось прочитать") from error
-    if not isinstance(value, dict):
-        raise ModelUnavailableError("Артефакт модели должен быть JSON-объектом")
-    return value
+        with path.open("rb") as stream:
+            content = stream.read(MAX_METADATA_BYTES + 1)
+        if len(content) > MAX_METADATA_BYTES:
+            raise ValueError
+        value = json.loads(content)
+        if not isinstance(value, dict):
+            raise ValueError
+        return value
+    except (OSError, UnicodeError, ValueError):
+        raise ModelUnavailableError("Артефакт модели не удалось прочитать") from None
 
 
 def _checked_bundle_file(bundle: Path, name: str) -> Path:
     unresolved_path = bundle / name
+    limit = MAX_METADATA_BYTES if name.endswith(".json") else MAX_MODEL_FILE_BYTES
     if unresolved_path.is_symlink():
         raise ModelUnavailableError("Файл модели не прошёл проверку пути")
     path = unresolved_path.resolve(strict=True)
-    if path.parent != bundle or not path.is_file():
-        raise ModelUnavailableError("Файл модели не прошёл проверку пути")
+    if path.parent != bundle or not path.is_file() or path.stat().st_size > limit:
+        raise ModelUnavailableError("Файл модели не прошёл проверку пути или размера")
     return path
 
 

@@ -90,7 +90,16 @@ def test_valid_evidence_never_authorizes_predictions(client, evaluation_route, s
         "alert_rate": 0.2,
     }
     payload = {
-        "format_version": 1,
+        "format_version": 2,
+        "task_semantics": "risk_of_telemetry_silence_within_horizon",
+        "feature_schema_version": "5",
+        "config_sha256": "a" * 64,
+        "library_versions": dict.fromkeys(
+            ("numpy", "pandas", "scikit-learn", "skops", "catboost", "lightgbm"), "1.0"
+        ),
+        "rolling_folds": [],
+        "operating_profiles": {},
+        "validation_confidence_intervals": {},
         "task": "sensor_failure",
         "version": "v1",
         "status": status,
@@ -115,7 +124,31 @@ def test_valid_evidence_never_authorizes_predictions(client, evaluation_route, s
             threshold=0.6,
             champion_name="extra_trees_isotonic",
             baseline_validation_pr_auc=0.25,
-            split_sizes={"fit": 100, "calibration": 30, "validation": 40, "test": 40},
+            split_sizes={"fit": 100, "calibration": 30, "validation": 120, "test": 40},
+            rolling_folds=[
+                {
+                    "index": index,
+                    "train_rows": 100,
+                    "calibration_rows": 30,
+                    "validation_rows": 40,
+                    "threshold": 0.6,
+                    "metrics": dict(metrics),
+                }
+                for index in range(1, 4)
+            ],
+            operating_profiles={
+                name: {"threshold": 0.6, "precision": 0.8, "recall": 0.7, "alert_rate": 0.2}
+                for name in ("high_precision", "balanced", "high_recall")
+            },
+            validation_confidence_intervals={
+                name: {
+                    "lower": 0.0,
+                    "upper": 1.0,
+                    "level": 0.95,
+                    "method": "student_t_across_rolling_folds",
+                }
+                for name in metrics
+            },
             quality_thresholds={
                 "minimum_precision": 0.7,
                 "minimum_recall": 0.5,

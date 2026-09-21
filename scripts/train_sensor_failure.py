@@ -31,11 +31,13 @@ from forpost_prediction_core.capabilities import EvidenceTier, PredictionTask
 from forpost_prediction_core.config import load_ml_config
 from forpost_prediction_core.dataset import build_sensor_failure_dataset
 from forpost_prediction_core.evaluation_report import (
+    LIBRARY_NAMES,
     EvaluationHorizonHours,
     EvaluationReport,
     EvaluationReportUnavailableError,
     EvaluationVersion,
     QualityThresholds,
+    validation_evidence_payload,
     write_evaluation_report,
 )
 from forpost_prediction_core.registry import (
@@ -76,6 +78,12 @@ def main() -> int:
     quality_thresholds = None
     horizon_hours = None
     stage = "configuration"
+    schema_evidence = {
+        "task_semantics": "risk_of_telemetry_silence_within_horizon",
+        "feature_schema_version": None,
+        "config_sha256": None,
+        "library_versions": {},
+    }
     try:
         report_version = TypeAdapter(EvaluationVersion).validate_python(arguments.version)
         ml_config = load_ml_config(REPOSITORY_ROOT / "ml" / "config.yaml")
@@ -83,6 +91,10 @@ def main() -> int:
             {name: getattr(ml_config.training, name) for name in QualityThresholds.model_fields}
         )
         horizon_hours = TypeAdapter(EvaluationHorizonHours).validate_python(ml_config.horizon_hours)
+        schema_evidence.update(
+            feature_schema_version=ml_config.feature_schema_version,
+            config_sha256=ml_config.sha256,
+        )
         stage = "source"
         window = load_training_window(arguments.raw_root, max_events=ml_config.max_training_events)
         stage = "dataset"
@@ -96,6 +108,9 @@ def main() -> int:
             feature_windows_hours=ml_config.feature_windows_hours,
         )
         stage = "training"
+        schema_evidence["library_versions"] = {
+            package: importlib.metadata.version(package) for package in sorted(LIBRARY_NAMES)
+        }
         result = train_champion(
             dataset.drop(columns=["evidence_tier"]),
             label_column="silence_label",
@@ -123,9 +138,12 @@ def main() -> int:
             raise TrainingUnavailableError("Время batch inference превышает 5 минут")
         dataset_times = normalize_event_times(dataset["prediction_at"])
         card = ModelCard(
+            format_version=2,
+            model_format=result.model_format,
+            **schema_evidence,
+            **validation_evidence_payload(result),
             task=PredictionTask.SENSOR_FAILURE,
             version=arguments.version,
-            feature_schema_version=ml_config.feature_schema_version,
             evidence_tier=EvidenceTier.PROXY,
             calibrated=True,
             created_at=datetime.now(UTC),
@@ -136,11 +154,6 @@ def main() -> int:
             label_strategy=ml_config.label_strategy,
             horizon_hours=ml_config.horizon_hours,
             purge_hours=ml_config.training.purge_hours,
-            config_sha256=ml_config.sha256,
-            library_versions={
-                package: importlib.metadata.version(package)
-                for package in ("numpy", "pandas", "scikit-learn", "skops")
-            },
             dataset_start_at=dataset_times.min().to_pydatetime(),
             dataset_end_at=dataset_times.max().to_pydatetime(),
             source_event_count=len(window.events),
@@ -153,8 +166,15 @@ def main() -> int:
             inference_duration_seconds=inference_duration,
         )
         stage = "release"
-        publish_model_release(arguments.registry_root, result.model, card, payload)
+        publish_model_release(
+            arguments.registry_root,
+            result.model,
+            card,
+            payload,
+            parity_features=current.loc[:, result.feature_columns],
+        )
     except (
+        ImportError,
         OSError,
         SourceSnapshotError,
         ModelUnavailableError,
@@ -180,6 +200,7 @@ def main() -> int:
             quality_thresholds=quality_thresholds,
             horizon_hours=horizon_hours if stage != "configuration" else None,
             reason_code=reason_code,
+            schema_evidence=schema_evidence,
         )
         print(f"Обучение не опубликовано: {reason_code}", file=sys.stderr)
         return 1
@@ -190,6 +211,7 @@ def main() -> int:
         quality_thresholds=quality_thresholds,
         horizon_hours=horizon_hours,
         result=result,
+        schema_evidence=schema_evidence,
     ):
         return 1
     summary = {
@@ -212,13 +234,16 @@ def _save_report(
     version,
     quality_thresholds,
     horizon_hours,
+    schema_evidence,
     reason_code=None,
     result=None,
 ) -> bool:
     """Сохраняет только доступные доказательства, не раскрывая текст исключений."""
     try:
         report = EvaluationReport(
-            format_version=1,
+            format_version=2,
+            **schema_evidence,
+            **validation_evidence_payload(evidence),
             task="sensor_failure",
             version=version,
             status="rejected" if reason_code is not None else "published",

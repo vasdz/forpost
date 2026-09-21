@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 import numpy as np
@@ -36,6 +36,9 @@ class TrainingEvidence:
     validation_metrics: BinaryMetrics | None = None
     threshold: float | None = None
     champion_name: str | None = None
+    rolling_folds: tuple[FoldMetrics, ...] = ()
+    rolling_fold_sizes: tuple[dict[str, int], ...] = ()
+    operating_profiles: dict[str, OperatingProfile] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -170,6 +173,7 @@ class TrainingResult:
     rolling_folds: tuple[FoldMetrics, ...]
     operating_profiles: dict[str, OperatingProfile]
     model_format: str
+    rolling_fold_sizes: tuple[dict[str, int], ...]
     default_profile: str = "balanced"
 
 
@@ -427,6 +431,9 @@ def train_champion(
         evidence.validation_metrics = None
         evidence.threshold = None
         evidence.champion_name = None
+        evidence.rolling_folds = ()
+        evidence.rolling_fold_sizes = ()
+        evidence.operating_profiles = {}
     settings = config or TrainingConfig()
     development, test = split_development_and_test(
         frame,
@@ -455,6 +462,7 @@ def train_champion(
     predictions: dict[str, list[FoldPredictions]] = {}
     last_models: dict[str, Any] = {}
     baseline_scores: list[float] = []
+    fold_sizes: list[dict[str, int]] = []
     for fold in folds:
         fit, calibration = _split_fit_calibration(
             fold.train,
@@ -468,6 +476,13 @@ def train_champion(
             ("validation", fold.validation),
         ):
             _require_partition_support(values[label_column].to_numpy(), partition, settings)
+        fold_sizes.append(
+            {
+                "train_rows": len(fit),
+                "calibration_rows": len(calibration),
+                "validation_rows": len(fold.validation),
+            }
+        )
         fit_x, calibration_x = fit.loc[:, feature_columns], calibration.loc[:, feature_columns]
         validation_x = fold.validation.loc[:, feature_columns]
         validation_y = fold.validation[label_column].to_numpy(dtype=np.int8)
@@ -544,6 +559,9 @@ def train_champion(
         evidence.validation_metrics = champion.metrics
         evidence.threshold = champion.threshold
         evidence.champion_name = champion.name
+        evidence.rolling_folds = champion.rolling_folds
+        evidence.rolling_fold_sizes = tuple(fold_sizes)
+        evidence.operating_profiles = profiles_by_candidate[champion.name]
         evidence.stage = "test"
         evidence.split_sizes = {
             "fit": len(fit),
@@ -584,6 +602,7 @@ def train_champion(
         rolling_folds=champion.rolling_folds,
         operating_profiles=profiles_by_candidate[champion.name],
         model_format=candidate_model_format(champion.name),
+        rolling_fold_sizes=tuple(fold_sizes),
     )
 
 
