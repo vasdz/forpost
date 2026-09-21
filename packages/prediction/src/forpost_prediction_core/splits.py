@@ -34,7 +34,11 @@ def make_rolling_origin_folds(
     purge_hours: int,
 ) -> tuple[RollingFold, ...]:
     """Формирует expanding rolling-origin folds с временным эмбарго."""
-    ordered = frame.sort_values(time_column, kind="stable").reset_index(drop=True)
+    if purge_hours < 0:
+        raise ValueError("Период очистки не может быть отрицательным")
+    ordered = frame.copy()
+    ordered[time_column] = pd.to_datetime(ordered[time_column])
+    ordered = ordered.sort_values(time_column, kind="stable").reset_index(drop=True)
     points = ordered[time_column].drop_duplicates().sort_values().reset_index(drop=True)
     required = fold_count * validation_points + 2
     if fold_count < 2 or validation_points < 1 or len(points) < required:
