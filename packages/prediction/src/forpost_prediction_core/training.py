@@ -31,6 +31,18 @@ class TrainingUnavailableError(ValueError):
     """Набор или кандидаты не позволяют честно опубликовать модель."""
 
 
+@dataclass
+class TrainingEvidence:
+    """Снимок уже вычисленных доказательств без test-метрик и исходных строк."""
+
+    stage: str = "training"
+    split_sizes: dict[str, int] | None = None
+    baseline_validation_pr_auc: float | None = None
+    validation_metrics: BinaryMetrics | None = None
+    threshold: float | None = None
+    champion_name: str | None = None
+
+
 @dataclass(frozen=True)
 class TrainingConfig:
     seed: int = 20260915
@@ -126,8 +138,16 @@ def train_champion(
     label_column: str,
     time_column: str,
     config: TrainingConfig | None = None,
+    evidence: TrainingEvidence | None = None,
 ) -> TrainingResult:
     """Обучает кандидатов, выбирает их по validation и один раз оценивает test."""
+    if evidence is not None:
+        evidence.stage = "training"
+        evidence.split_sizes = None
+        evidence.baseline_validation_pr_auc = None
+        evidence.validation_metrics = None
+        evidence.threshold = None
+        evidence.champion_name = None
     settings = config or TrainingConfig()
     _validate_training_frame(frame, label_column, time_column, settings)
     split = split_by_time(
@@ -161,6 +181,14 @@ def train_champion(
     _require_partition_support(validation_y, "validation", settings)
     _require_partition_support(test_y, "test", settings)
 
+    if evidence is not None:
+        evidence.split_sizes = {
+            "fit": len(fit),
+            "calibration": len(calibration),
+            "validation": len(split.validation),
+            "test": len(split.test),
+        }
+
     fitted: dict[str, Any] = {}
     validation_probabilities: dict[str, np.ndarray] = {}
     estimators = _candidate_estimators(fit_x, settings.seed)
@@ -172,6 +200,8 @@ def train_champion(
         baseline_probabilities,
         threshold=max(settings.thresholds),
     )
+    if evidence is not None:
+        evidence.baseline_validation_pr_auc = baseline_metrics.pr_auc
     for name, estimator in estimators.items():
         estimator.fit(fit_x, fit_y)
         for calibration_method in ("isotonic", "sigmoid"):
@@ -185,12 +215,19 @@ def train_champion(
             fitted[candidate_name] = calibrated
             validation_probabilities[candidate_name] = calibrated.predict_proba(validation_x)[:, 1]
 
+    if evidence is not None:
+        evidence.stage = "validation"
     champion = rank_candidates(
         validation_y,
         validation_probabilities,
         settings,
         baseline_pr_auc=baseline_metrics.pr_auc,
     )
+    if evidence is not None:
+        evidence.validation_metrics = champion.metrics
+        evidence.threshold = champion.threshold
+        evidence.champion_name = champion.name
+        evidence.stage = "test"
     champion_model = fitted[champion.name]
     test_probabilities = champion_model.predict_proba(test_x)[:, 1]
     test_metrics = evaluate_binary_probabilities(

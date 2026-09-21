@@ -6,6 +6,7 @@ from forpost_api.middleware.payload_guard import PayloadSizeLimitMiddleware
 from forpost_api.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from forpost_api.middleware.security_headers import SecurityHeadersMiddleware
 from forpost_api.routes.availability import router as availability_router
+from forpost_api.routes.model_evaluation import router as model_evaluation_router
 from forpost_api.routes.predictions import router as predictions_router
 from forpost_api.routes.v1.analytics import router as analytics_router
 from forpost_api.routes.v1.demo_session import router as demo_session_router
@@ -33,6 +34,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(predictions_router)
 app.include_router(availability_router)
+app.include_router(model_evaluation_router)
 app.include_router(risks_router, prefix="/api/v1")
 app.include_router(maintenance_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")

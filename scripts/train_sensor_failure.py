@@ -29,13 +29,23 @@ from forpost_connectors.local_snapshot import SourceSnapshotError, load_training
 from forpost_prediction_core.capabilities import EvidenceTier, PredictionTask
 from forpost_prediction_core.config import load_ml_config
 from forpost_prediction_core.dataset import build_sensor_failure_dataset
+from forpost_prediction_core.evaluation_report import (
+    EvaluationReport,
+    EvaluationReportUnavailableError,
+    QualityThresholds,
+    write_evaluation_report,
+)
 from forpost_prediction_core.registry import (
     ModelCard,
     ModelUnavailableError,
     publish_model_release,
 )
 from forpost_prediction_core.time_utils import normalize_event_times
-from forpost_prediction_core.training import TrainingUnavailableError, train_champion
+from forpost_prediction_core.training import (
+    TrainingEvidence,
+    TrainingUnavailableError,
+    train_champion,
+)
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -47,14 +57,24 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--registry-root", type=Path, default=REPOSITORY_ROOT / "ml" / "models")
     parser.add_argument("--version", default="v1")
+    parser.add_argument(
+        "--evaluation-report",
+        type=Path,
+        default=REPOSITORY_ROOT / "data" / "processed" / "ml-evaluation.json",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     arguments = parse_arguments()
+    evidence = TrainingEvidence()
+    ml_config = None
+    stage = "configuration"
     try:
         ml_config = load_ml_config(REPOSITORY_ROOT / "ml" / "config.yaml")
+        stage = "source"
         window = load_training_window(arguments.raw_root, max_events=ml_config.max_training_events)
+        stage = "dataset"
         events, channels = _to_frames(window.events, window.channels)
         dataset = build_sensor_failure_dataset(
             events,
@@ -64,12 +84,15 @@ def main() -> int:
             minimum_history_events=3,
             feature_windows_hours=ml_config.feature_windows_hours,
         )
+        stage = "training"
         result = train_champion(
             dataset.drop(columns=["evidence_tier"]),
             label_column="silence_label",
             time_column="prediction_at",
             config=ml_config.training,
+            evidence=evidence,
         )
+        stage = "inference"
         current = _current_features(
             events,
             channels,
@@ -118,6 +141,7 @@ def main() -> int:
             test_row_count=result.test_row_count,
             inference_duration_seconds=inference_duration,
         )
+        stage = "release"
         publish_model_release(arguments.registry_root, result.model, card, payload)
     except (
         OSError,
@@ -126,8 +150,22 @@ def main() -> int:
         TrainingUnavailableError,
         TypeError,
         ValueError,
-    ) as error:
-        print(f"Обучение не опубликовано: {error}", file=sys.stderr)
+    ):
+        failure_stage = evidence.stage if stage == "training" else stage
+        reason_code = {
+            "configuration": "configuration_invalid",
+            "source": "source_unavailable",
+            "dataset": "dataset_unavailable",
+            "training": "training_unavailable",
+            "validation": "validation_rejected",
+            "test": "test_rejected",
+            "inference": "inference_unavailable",
+            "release": "release_unavailable",
+        }[failure_stage]
+        _save_report(arguments, ml_config, evidence, reason_code=reason_code)
+        print(f"Обучение не опубликовано: {reason_code}", file=sys.stderr)
+        return 1
+    if not _save_report(arguments, ml_config, evidence, result=result):
         return 1
     summary = {
         "status": "published",
@@ -140,6 +178,44 @@ def main() -> int:
     }
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
+
+
+def _save_report(arguments, ml_config, evidence, *, reason_code=None, result=None) -> bool:
+    """Сохраняет только доступные доказательства, не раскрывая текст исключений."""
+    try:
+        thresholds = (
+            None
+            if ml_config is None
+            else {
+                name: getattr(ml_config.training, name) for name in QualityThresholds.model_fields
+            }
+        )
+        report = EvaluationReport(
+            format_version=1,
+            task="sensor_failure",
+            version=arguments.version,
+            status="rejected" if reason_code is not None else "published",
+            evidence_tier="proxy",
+            label_strategy="silence_horizon_proxy",
+            created_at=datetime.now(UTC),
+            reason_code=reason_code,
+            quality_thresholds=thresholds,
+            split_sizes=evidence.split_sizes,
+            baseline_validation_pr_auc=evidence.baseline_validation_pr_auc,
+            validation_metrics=(
+                _public_metrics(evidence.validation_metrics)
+                if evidence.validation_metrics is not None
+                else None
+            ),
+            test_metrics=_public_metrics(result.test_metrics) if result is not None else None,
+            threshold=evidence.threshold,
+            champion_name=evidence.champion_name,
+        )
+        write_evaluation_report(arguments.evaluation_report, report)
+    except (EvaluationReportUnavailableError, OSError, TypeError, ValueError):
+        print("Отчёт оценки не сохранён: evaluation_write_failed", file=sys.stderr)
+        return False
+    return True
 
 
 def _to_frames(events, channels) -> tuple[pd.DataFrame, pd.DataFrame]:
