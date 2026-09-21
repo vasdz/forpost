@@ -145,6 +145,44 @@ def test_profiles_include_threshold_above_largest_interior_probability():
         )
 
 
+def test_profile_rejection_explains_candidate_gates_without_raw_predictions():
+    labels = np.array([1, 1, 0, 0, 0, 0, 0, 0])
+    predictions = tuple(
+        FoldPredictions(index, labels, np.full(8, 0.25), 0.25) for index in (1, 2, 3)
+    )
+    diagnostics = {}
+    with pytest.raises(TrainingUnavailableError):
+        select_fold_operating_profiles(predictions, TrainingConfig(), diagnostics=diagnostics)
+    assert diagnostics["thresholds_evaluated"] > 0
+    assert set(diagnostics["profiles"]) == {"high_precision", "balanced", "high_recall"}
+    for profile in diagnostics["profiles"].values():
+        assert profile["feasible_threshold_count"] == 0
+        assert "baseline_delta" in profile["failure_counts"]
+        assert len(profile["closest_folds"]) == 3
+        assert set(profile["mean_metrics"]) == set(profile["worst_metrics"])
+
+
+def test_class_support_rejection_records_all_development_partitions():
+    from forpost_prediction_core.training import TrainingEvidence
+
+    evidence = TrainingEvidence()
+    with pytest.raises(TrainingUnavailableError):
+        train_champion(
+            _training_frame(),
+            label_column="label",
+            time_column="cutoff",
+            config=TrainingConfig(purge_hours=0, minimum_positive_examples=30),
+            evidence=evidence,
+        )
+    assert evidence.diagnostics["step"] == "partition_support"
+    assert len(evidence.diagnostics["folds"]) == 3
+    for fold in evidence.diagnostics["folds"]:
+        assert fold["fit"]["positive"] > 0
+        assert fold["calibration"]["positive"] < 30
+        assert fold["validation"]["negative"] > 0
+    assert "test" not in evidence.diagnostics
+
+
 @pytest.mark.parametrize("backend", ["catboost", "lightgbm"])
 def test_training_rejects_unavailable_native_candidate_without_fallback(backend, monkeypatch):
     import sys

@@ -24,6 +24,7 @@ from forpost_prediction_core.evaluation import (
     select_operating_threshold,
 )
 from forpost_prediction_core.splits import make_rolling_origin_folds
+from forpost_prediction_core.validation_diagnostics import empty_diagnostics
 
 
 @dataclass
@@ -39,6 +40,7 @@ class TrainingEvidence:
     rolling_folds: tuple[FoldMetrics, ...] = ()
     rolling_fold_sizes: tuple[dict[str, int], ...] = ()
     operating_profiles: dict[str, OperatingProfile] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=empty_diagnostics)
 
 
 @dataclass(frozen=True)
@@ -337,7 +339,10 @@ def rank_fold_candidates(
 
 
 def select_fold_operating_profiles(
-    predictions: tuple[FoldPredictions, ...], config: TrainingConfig
+    predictions: tuple[FoldPredictions, ...],
+    config: TrainingConfig,
+    *,
+    diagnostics: dict | None = None,
 ) -> dict[str, OperatingProfile]:
     """Каждый единый порог одобряется во всех validation folds, без медианного суррогата."""
     if len(predictions) != config.minimum_validation_folds or tuple(
@@ -363,6 +368,9 @@ def select_fold_operating_profiles(
     )
     selected: dict[str, OperatingProfile] = {}
     scores: dict[str, tuple[float, float, float, float]] = {}
+    diagnostic_scores = {}
+    if diagnostics is not None:
+        diagnostics.update(thresholds_evaluated=len(candidates), profiles={})
     for threshold in sorted(candidates):
         folds = []
         for item, base, positives, negatives in prepared:
@@ -385,6 +393,10 @@ def select_fold_operating_profiles(
             folds.append(FoldMetrics(item.fold_index, threshold, metrics, item.baseline_pr_auc))
         frozen_folds = tuple(folds)
         for profile in config.profiles:
+            if diagnostics is not None:
+                _record_profile_diagnostic(
+                    diagnostics, diagnostic_scores, profile, frozen_folds, config
+                )
             if not all(
                 _passes(fold.metrics, config, fold.baseline_pr_auc)
                 and fold.metrics.precision > profile.minimum_precision
@@ -415,6 +427,63 @@ def select_fold_operating_profiles(
     return selected
 
 
+def _record_profile_diagnostic(diagnostics, scores, profile, folds, config):
+    """Сохраняет ближайший rejected-порог отдельно от одобренного operating profile."""
+    from forpost_prediction_core.evaluation_report import EvaluationMetrics
+
+    failures = []
+    for fold in folds:
+        metrics = fold.metrics
+        checks = {
+            "precision": metrics.precision
+            > max(config.minimum_precision, profile.minimum_precision),
+            "recall": metrics.recall > max(config.minimum_recall, profile.minimum_recall),
+            "alert_rate": metrics.alert_rate
+            <= min(config.maximum_alert_rate, profile.maximum_alert_rate),
+            "calibration": metrics.expected_calibration_error
+            <= config.maximum_expected_calibration_error,
+            "brier": metrics.brier_score <= config.maximum_brier_score,
+            "baseline_delta": metrics.pr_auc
+            > fold.baseline_pr_auc + config.minimum_baseline_pr_auc_delta,
+        }
+        failures.append(tuple(name for name, passed in checks.items() if not passed))
+    entry = diagnostics["profiles"].setdefault(
+        profile.name, {"feasible_threshold_count": 0, "failure_counts": {}}
+    )
+    entry["feasible_threshold_count"] += int(not any(failures))
+    for gate in sorted({gate for failed in failures for gate in failed}):
+        entry["failure_counts"][gate] = entry["failure_counts"].get(gate, 0) + 1
+    score = (-sum(map(len, failures)), min(fold.metrics.f1 for fold in folds), folds[0].threshold)
+    if profile.name in scores and score <= scores[profile.name]:
+        return
+    scores[profile.name] = score
+    names = EvaluationMetrics.model_fields
+    entry.update(
+        closest_threshold=folds[0].threshold,
+        closest_folds=[
+            {
+                "index": fold.fold_index,
+                "metrics": {name: float(getattr(fold.metrics, name)) for name in names},
+                "failed_gates": failed,
+            }
+            for fold, failed in zip(folds, failures, strict=True)
+        ],
+        mean_metrics={
+            name: float(np.mean([getattr(fold.metrics, name) for fold in folds])) for name in names
+        },
+        worst_metrics={
+            name: float(
+                (
+                    max
+                    if name in {"alert_rate", "brier_score", "expected_calibration_error"}
+                    else min
+                )(getattr(fold.metrics, name) for fold in folds)
+            )
+            for name in names
+        },
+    )
+
+
 def train_champion(
     frame: pd.DataFrame,
     *,
@@ -434,6 +503,7 @@ def train_champion(
         evidence.rolling_folds = ()
         evidence.rolling_fold_sizes = ()
         evidence.operating_profiles = {}
+        evidence.diagnostics = empty_diagnostics()
     settings = config or TrainingConfig()
     development, test = split_development_and_test(
         frame,
@@ -441,12 +511,21 @@ def train_champion(
         test_fraction=settings.test_fraction,
         purge_hours=settings.purge_hours,
     )
+    if evidence is not None:
+        evidence.diagnostics["step"] = "development_support"
+        evidence.diagnostics["development"] = (
+            _support(development, label_column, time_column)
+            if label_column in development
+            else None
+        )
     _validate_training_frame(development, label_column, time_column, settings)
     excluded = {label_column, time_column, "object_id"}
     feature_columns = tuple(column for column in frame.columns if column not in excluded)
     if not feature_columns:
         raise TrainingUnavailableError("В наборе отсутствуют допустимые признаки")
 
+    if evidence is not None:
+        evidence.diagnostics["step"] = "rolling_split"
     try:
         folds = make_rolling_origin_folds(
             development,
@@ -463,19 +542,50 @@ def train_champion(
     last_models: dict[str, Any] = {}
     baseline_scores: list[float] = []
     fold_sizes: list[dict[str, int]] = []
+    prepared = []
+    support_failed = False
     for fold in folds:
-        fit, calibration = _split_fit_calibration(
-            fold.train,
-            time_column,
-            calibration_fraction=settings.calibration_fraction,
-            purge_hours=settings.purge_hours,
-        )
+        diagnostic = {
+            "index": fold.index,
+            "fit": None,
+            "calibration": None,
+            "validation": _support(fold.validation, label_column, time_column),
+            "failure_code": None,
+        }
+        if evidence is not None:
+            evidence.diagnostics["step"] = "calibration_split"
+            evidence.diagnostics["folds"].append(diagnostic)
+        try:
+            fit, calibration = _split_fit_calibration(
+                fold.train,
+                time_column,
+                calibration_fraction=settings.calibration_fraction,
+                purge_hours=settings.purge_hours,
+            )
+        except TrainingUnavailableError:
+            diagnostic["failure_code"] = "calibration_split_unavailable"
+            support_failed = True
+            continue
+        diagnostic["fit"] = _support(fit, label_column, time_column)
+        diagnostic["calibration"] = _support(calibration, label_column, time_column)
         for partition, values in (
             ("fit", fit),
             ("calibration", calibration),
             ("validation", fold.validation),
         ):
-            _require_partition_support(values[label_column].to_numpy(), partition, settings)
+            try:
+                _require_partition_support(values[label_column].to_numpy(), partition, settings)
+            except TrainingUnavailableError:
+                diagnostic["failure_code"] = "class_support_insufficient"
+                support_failed = True
+        prepared.append((fold, fit, calibration))
+    if support_failed:
+        if evidence is not None:
+            evidence.diagnostics["step"] = "partition_support"
+        raise TrainingUnavailableError(
+            "Rolling folds не имеют достаточной временной/классовой поддержки"
+        )
+    for fold, fit, calibration in prepared:
         fold_sizes.append(
             {
                 "train_rows": len(fit),
@@ -501,8 +611,12 @@ def train_champion(
             }
             evidence.baseline_validation_pr_auc = float(np.mean(baseline_scores))
         for name, estimator in build_candidate_estimators(fit_x, settings.seed).items():
+            if evidence is not None:
+                evidence.diagnostics["step"] = "candidate_fit"
             estimator.fit(fit_x, fit[label_column].to_numpy(dtype=np.int8))
             for method in ("isotonic", "sigmoid"):
+                if evidence is not None:
+                    evidence.diagnostics["step"] = "calibration"
                 calibrated = _calibrate(estimator, calibration_x, calibration[label_column], method)
                 candidate_name = f"{name}_{method}"
                 predictions.setdefault(candidate_name, []).append(
@@ -518,10 +632,16 @@ def train_champion(
 
     if evidence is not None:
         evidence.stage = "validation"
+        evidence.diagnostics["step"] = "validation_selection"
     profiles_by_candidate: dict[str, dict[str, OperatingProfile]] = {}
     for name, values in predictions.items():
+        diagnostic = {}
+        if evidence is not None:
+            evidence.diagnostics["candidates"][name] = diagnostic
         try:
-            profiles_by_candidate[name] = select_fold_operating_profiles(tuple(values), settings)
+            profiles_by_candidate[name] = select_fold_operating_profiles(
+                tuple(values), settings, diagnostics=diagnostic if evidence is not None else None
+            )
         except TrainingUnavailableError:
             continue
     champion = rank_fold_candidates(
@@ -541,6 +661,8 @@ def train_champion(
         random_state=settings.seed,
         n_jobs=1,
     )
+    if evidence is not None:
+        evidence.diagnostics["step"] = "refit"
     fit, calibration = _split_fit_calibration(
         development,
         time_column,
@@ -563,6 +685,7 @@ def train_champion(
         evidence.rolling_fold_sizes = tuple(fold_sizes)
         evidence.operating_profiles = profiles_by_candidate[champion.name]
         evidence.stage = "test"
+        evidence.diagnostics["step"] = "frozen_test"
         evidence.split_sizes = {
             "fit": len(fit),
             "calibration": len(calibration),
@@ -604,6 +727,15 @@ def train_champion(
         model_format=candidate_model_format(champion.name),
         rolling_fold_sizes=tuple(fold_sizes),
     )
+
+
+def _support(frame: pd.DataFrame, label_column: str, time_column: str) -> dict[str, int]:
+    labels = frame[label_column].to_numpy()
+    return {
+        "positive": int(np.count_nonzero(labels == 1)),
+        "negative": int(np.count_nonzero(labels == 0)),
+        "time_points": int(frame[time_column].nunique()),
+    }
 
 
 def _calibrate(estimator: Any, features: pd.DataFrame, labels: pd.Series, method: str) -> Any:

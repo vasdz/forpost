@@ -449,6 +449,89 @@ def test_command_rejects_validation_without_release_or_test_evidence(command, re
     assert not arguments.registry_root.exists()
 
 
+@pytest.mark.parametrize(
+    ("stage", "reason"),
+    [("rolling_validation", "validation_rejected"), ("frozen_test", "test_rejected")],
+)
+def test_command_sanitizes_stage_failures(command, reports, monkeypatch, capsys, stage, reason):
+    module, arguments, _config = command
+
+    def fail_training(*_args, evidence, **_kwargs):
+        evidence.stage = stage
+        raise RuntimeError("C:/private-source/secret-channel")
+
+    monkeypatch.setattr(module, "train_champion", fail_training)
+    assert module.main() == 1
+    report = reports.load_evaluation_report(arguments.evaluation_report)
+    assert report.reason_code == reason
+    assert report.test_metrics is None
+    assert not arguments.registry_root.exists()
+    captured = capsys.readouterr()
+    emitted = captured.out + captured.err + arguments.evaluation_report.read_text(encoding="utf-8")
+    assert "secret-channel" not in emitted
+    assert "Traceback" not in emitted
+
+
+def test_inference_budget_includes_current_feature_building(command, reports, monkeypatch):
+    module, arguments, _config = command
+    elapsed = [0.0]
+    current_features = module._current_features
+
+    def slow_features(*args):
+        elapsed[0] += 301.0
+        return current_features(*args)
+
+    monkeypatch.setattr(module.time, "perf_counter", lambda: elapsed[0])
+    monkeypatch.setattr(module, "_current_features", slow_features)
+    assert module.main() == 1
+    report = reports.load_evaluation_report(arguments.evaluation_report)
+    assert report.reason_code == "inference_unavailable"
+    assert report.test_metrics is None
+    assert not arguments.registry_root.exists()
+
+
+def test_command_writes_exact_local_validation_diagnostics(command, reports):
+    from dataclasses import replace
+
+    module, arguments, config = command
+    config.training = replace(config.training, minimum_precision=1.0)
+    assert module.main() == 1
+    path = arguments.evaluation_report.with_name("evaluation-v1-validation.json")
+    assert path.is_file()
+    diagnostic = json.loads(path.read_text(encoding="utf-8"))
+    assert diagnostic["reason_code"] == "validation_rejected"
+    assert diagnostic["diagnostics"]["step"] == "validation_selection"
+    assert len(diagnostic["diagnostics"]["folds"]) == 3
+    assert len(diagnostic["diagnostics"]["candidates"]) == 10
+    assert "test_metrics" not in diagnostic
+    assert "channel-" not in path.read_text(encoding="utf-8")
+    assert (
+        "diagnostics"
+        not in reports.load_evaluation_report(arguments.evaluation_report).model_dump()
+    )
+
+
+def test_validation_diagnostics_reject_raw_fields_and_preserve_old_file(tmp_path):
+    from forpost_prediction_core import validation_diagnostics as diagnostics
+
+    assert hasattr(diagnostics, "ValidationDiagnosticReport")
+    payload = {
+        "format_version": 1,
+        "version": "v3",
+        "config_sha256": None,
+        "reason_code": "training_unavailable",
+        "diagnostics": diagnostics.empty_diagnostics(),
+    }
+    report = diagnostics.ValidationDiagnosticReport.model_validate(payload)
+    path = tmp_path / "validation.json"
+    diagnostics.write_validation_diagnostics(path, report)
+    assert json.loads(path.read_text(encoding="utf-8")) == payload
+    payload["diagnostics"]["raw_path"] = "private-source"
+    with pytest.raises(ValidationError):
+        diagnostics.ValidationDiagnosticReport.model_validate(payload)
+    assert "private-source" not in path.read_text(encoding="utf-8")
+
+
 def test_command_replaces_stale_report_on_source_failure_without_leaking_error(
     command, reports, monkeypatch, capsys
 ):

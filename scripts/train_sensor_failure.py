@@ -26,7 +26,8 @@ for source_path in (
     if str(source_path) not in sys.path:
         sys.path.insert(0, str(source_path))
 
-from forpost_connectors.local_snapshot import SourceSnapshotError, load_training_window
+from forpost_connectors.local_snapshot import SourceSnapshotError as SourceSnapshotError
+from forpost_connectors.local_snapshot import load_training_window
 from forpost_prediction_core.capabilities import EvidenceTier, PredictionTask
 from forpost_prediction_core.config import load_ml_config
 from forpost_prediction_core.dataset import build_sensor_failure_dataset
@@ -42,14 +43,18 @@ from forpost_prediction_core.evaluation_report import (
 )
 from forpost_prediction_core.registry import (
     ModelCard,
-    ModelUnavailableError,
     publish_model_release,
 )
+from forpost_prediction_core.registry import ModelUnavailableError as ModelUnavailableError
 from forpost_prediction_core.time_utils import normalize_event_times
 from forpost_prediction_core.training import (
     TrainingEvidence,
     TrainingUnavailableError,
     train_champion,
+)
+from forpost_prediction_core.validation_diagnostics import (
+    ValidationDiagnosticReport,
+    write_validation_diagnostics,
 )
 
 
@@ -107,7 +112,7 @@ def main() -> int:
             minimum_history_events=3,
             feature_windows_hours=ml_config.feature_windows_hours,
         )
-        stage = "training"
+        stage = "rolling_validation"
         schema_evidence["library_versions"] = {
             package: importlib.metadata.version(package) for package in sorted(LIBRARY_NAMES)
         }
@@ -119,13 +124,13 @@ def main() -> int:
             evidence=evidence,
         )
         stage = "inference"
+        inference_started = time.perf_counter()
         current = _current_features(
             events,
             channels,
             result.feature_columns,
             ml_config.feature_windows_hours,
         )
-        inference_started = time.perf_counter()
         payload = _prediction_payload(
             current,
             result,
@@ -173,26 +178,21 @@ def main() -> int:
             payload,
             parity_features=current.loc[:, result.feature_columns],
         )
-    except (
-        ImportError,
-        OSError,
-        SourceSnapshotError,
-        ModelUnavailableError,
-        TrainingUnavailableError,
-        TypeError,
-        ValueError,
-    ):
-        failure_stage = evidence.stage if stage == "training" else stage
+    except Exception:
+        # Граница CLI скрывает также ошибки нативных библиотек; interrupt не перехватывается.
+        failure_stage = evidence.stage if stage == "rolling_validation" else stage
         reason_code = {
             "configuration": "configuration_invalid",
             "source": "source_unavailable",
             "dataset": "dataset_unavailable",
             "training": "training_unavailable",
             "validation": "validation_rejected",
+            "rolling_validation": "validation_rejected",
             "test": "test_rejected",
+            "frozen_test": "test_rejected",
             "inference": "inference_unavailable",
             "release": "release_unavailable",
-        }[failure_stage]
+        }.get(failure_stage, "training_unavailable")
         _save_report(
             arguments,
             evidence,
@@ -265,6 +265,18 @@ def _save_report(
             champion_name=evidence.champion_name,
         )
         write_evaluation_report(arguments.evaluation_report, report)
+        write_validation_diagnostics(
+            arguments.evaluation_report.with_name(
+                f"{arguments.evaluation_report.stem}-{version}-validation.json"
+            ),
+            ValidationDiagnosticReport(
+                format_version=1,
+                version=version,
+                config_sha256=schema_evidence["config_sha256"],
+                reason_code=reason_code,
+                diagnostics=evidence.diagnostics,
+            ),
+        )
     except (EvaluationReportUnavailableError, OSError, TypeError, ValueError):
         print("Отчёт оценки не сохранён: evaluation_write_failed", file=sys.stderr)
         return False
