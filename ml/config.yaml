@@ -1,7 +1,7 @@
 # Локальные параметры ML-контура; артефакты и результаты сохраняются вне Git.
 seed: 20260915
-feature_schema_version: "5"
-label_strategy: "silence_horizon_proxy"
+feature_schema_version: "6"
+label_strategy: "cadence_adjusted_silence_horizon_proxy_v2"
 horizon_hours: 24
 cutoff_count: 48
 max_training_events: 3000000

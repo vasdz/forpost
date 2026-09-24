@@ -84,7 +84,7 @@ def main() -> int:
     horizon_hours = None
     stage = "configuration"
     schema_evidence = {
-        "task_semantics": "risk_of_telemetry_silence_within_horizon",
+        "task_semantics": "risk_of_unexpected_telemetry_silence_within_horizon",
         "feature_schema_version": None,
         "config_sha256": None,
         "library_versions": {},
@@ -248,7 +248,7 @@ def _save_report(
             version=version,
             status="rejected" if reason_code is not None else "published",
             evidence_tier="proxy",
-            label_strategy="silence_horizon_proxy",
+            label_strategy="cadence_adjusted_silence_horizon_proxy_v2",
             horizon_hours=horizon_hours,
             created_at=datetime.now(UTC),
             reason_code=reason_code,

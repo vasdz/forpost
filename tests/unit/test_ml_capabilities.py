@@ -23,7 +23,7 @@ def test_event_only_sources_enable_only_sensor_failure_proxy() -> None:
     )
 
     assert sensor_failure.training_available is True
-    assert sensor_failure.label_strategy == "silence_horizon_proxy"
+    assert sensor_failure.label_strategy == "cadence_adjusted_silence_horizon_proxy_v2"
     assert sensor_failure.maximum_evidence_tier is EvidenceTier.PROXY
     assert fire_risk.training_available is False
     assert fire_risk.maximum_evidence_tier is EvidenceTier.ANOMALY

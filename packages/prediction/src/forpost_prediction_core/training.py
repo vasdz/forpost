@@ -484,6 +484,37 @@ def _record_profile_diagnostic(diagnostics, scores, profile, folds, config):
     )
 
 
+def profile_budget_feasibility(
+    positives: int,
+    negatives: int,
+    *,
+    minimum_recall: float,
+    maximum_alert_rate: float,
+) -> dict[str, int | bool]:
+    """Необходимая граница TP даже при идеальной precision; не разрешает публикацию."""
+    if positives < 1 or negatives < 1:
+        raise ValueError("Граница бюджета требует оба класса")
+    if not 0 <= minimum_recall <= 1 or not 0 < maximum_alert_rate <= 1:
+        raise ValueError("Некорректные ограничения recall или alert rate")
+    total = positives + negatives
+    minimum_tp = int(positives * minimum_recall)
+    while minimum_tp <= positives and minimum_tp / positives <= minimum_recall:
+        minimum_tp += 1
+    while minimum_tp > 0 and (minimum_tp - 1) / positives > minimum_recall:
+        minimum_tp -= 1
+    maximum_alerts = int(total * maximum_alert_rate)
+    # Коррекция float-границ использует те же отношения, что и фактические gates.
+    while maximum_alerts / total > maximum_alert_rate:
+        maximum_alerts -= 1
+    while maximum_alerts < total and (maximum_alerts + 1) / total <= maximum_alert_rate:
+        maximum_alerts += 1
+    return {
+        "minimum_true_positives": minimum_tp,
+        "maximum_alerts": maximum_alerts,
+        "feasible": minimum_tp <= min(positives, maximum_alerts),
+    }
+
+
 def train_champion(
     frame: pd.DataFrame,
     *,
@@ -585,6 +616,31 @@ def train_champion(
         raise TrainingUnavailableError(
             "Rolling folds не имеют достаточной временной/классовой поддержки"
         )
+    feasibility = []
+    for fold, _fit, _calibration in prepared:
+        support = _support(fold.validation, label_column, time_column)
+        for profile in settings.profiles:
+            feasibility.append(
+                {
+                    "fold_index": fold.index,
+                    "profile": profile.name,
+                    **profile_budget_feasibility(
+                        support["positive"],
+                        support["negative"],
+                        minimum_recall=max(settings.minimum_recall, profile.minimum_recall),
+                        maximum_alert_rate=min(
+                            settings.maximum_alert_rate, profile.maximum_alert_rate
+                        ),
+                    ),
+                }
+            )
+    if evidence is not None:
+        evidence.diagnostics["profile_feasibility"] = feasibility
+    if any(not entry["feasible"] for entry in feasibility):
+        if evidence is not None:
+            evidence.stage = "validation"
+            evidence.diagnostics["step"] = "profile_feasibility"
+        raise TrainingUnavailableError("Recall и alert budget несовместимы в validation fold")
     for fold, fit, calibration in prepared:
         fold_sizes.append(
             {

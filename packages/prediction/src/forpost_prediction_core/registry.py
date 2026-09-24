@@ -70,7 +70,7 @@ class ModelCard(ValidationEvidence):
     feature_columns: tuple[EvidenceString, ...]
     validation_metrics: EvaluationMetrics
     test_metrics: EvaluationMetrics
-    label_strategy: Literal["silence_horizon_proxy"]
+    label_strategy: Literal["cadence_adjusted_silence_horizon_proxy_v2"]
     horizon_hours: Annotated[int, Field(strict=True, ge=24, le=8760)]
     purge_hours: PositiveInt
     config_sha256: Sha256

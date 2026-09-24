@@ -57,7 +57,7 @@ class TaskCapability:
 _TASK_REQUIREMENTS: dict[PredictionTask, tuple[frozenset[SourceKind], str]] = {
     PredictionTask.SENSOR_FAILURE: (
         frozenset({SourceKind.EVENTS, SourceKind.CHANNELS}),
-        "silence_horizon_proxy",
+        "cadence_adjusted_silence_horizon_proxy_v2",
     ),
     PredictionTask.FIRE_RISK: (
         frozenset({SourceKind.EVENTS, SourceKind.CHANNELS, SourceKind.VERIFICATION_RESULTS}),

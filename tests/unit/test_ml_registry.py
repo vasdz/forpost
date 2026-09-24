@@ -304,7 +304,7 @@ def _audit_fields(
     return {
         "format_version": 2,
         "model_format": "skops",
-        "task_semantics": "risk_of_telemetry_silence_within_horizon",
+        "task_semantics": "risk_of_unexpected_telemetry_silence_within_horizon",
         "rolling_folds": [
             {
                 "index": index,
@@ -329,7 +329,7 @@ def _audit_fields(
             }
             for name, value in _complete_metrics(precision=0.8, recall=0.7, f1=0.75).items()
         },
-        "label_strategy": "silence_horizon_proxy",
+        "label_strategy": "cadence_adjusted_silence_horizon_proxy_v2",
         "horizon_hours": 24,
         "purge_hours": 24,
         "config_sha256": "a" * 64,

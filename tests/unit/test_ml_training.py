@@ -183,6 +183,64 @@ def test_class_support_rejection_records_all_development_partitions():
     assert "test" not in evidence.diagnostics
 
 
+def test_impossible_recall_budget_rejects_before_fit_or_final_test(monkeypatch):
+    """Даже идеальный классификатор не укладывает нужные TP в бюджет тревог."""
+    from forpost_prediction_core import training
+
+    frame = _training_frame()
+    frame["label"] = np.arange(len(frame)) % 2
+    development_end = frame["cutoff"].drop_duplicates().iloc[64]
+    frame.loc[frame["cutoff"] >= development_end, "label"] = 999
+
+    def forbidden_fit(*_args):
+        raise AssertionError("Кандидаты не должны строиться при невозможных gates")
+
+    monkeypatch.setattr(training, "build_candidate_estimators", forbidden_fit)
+    evidence = training.TrainingEvidence()
+    with pytest.raises(TrainingUnavailableError):
+        train_champion(
+            frame,
+            label_column="label",
+            time_column="cutoff",
+            config=TrainingConfig(
+                purge_hours=0,
+                minimum_positive_examples=1,
+                minimum_negative_examples=1,
+                maximum_alert_rate=0.1,
+            ),
+            evidence=evidence,
+        )
+    assert evidence.stage == "validation"
+    assert evidence.diagnostics["step"] == "profile_feasibility"
+    assert len(evidence.diagnostics["profile_feasibility"]) == 9
+    assert all(
+        entry["minimum_true_positives"] > entry["maximum_alerts"] and not entry["feasible"]
+        for entry in evidence.diagnostics["profile_feasibility"]
+    )
+    assert evidence.diagnostics["candidates"] == {}
+    assert evidence.champion_name is None
+
+
+@pytest.mark.parametrize(
+    ("positives", "negatives", "recall", "budget", "minimum_tp", "maximum_alerts"),
+    [(2, 8, 0.5, 0.1, 2, 1), (100, 100, 0.29, 0.145, 30, 29)],
+)
+def test_profile_feasibility_respects_strict_recall_and_integer_alert_budget(
+    positives, negatives, recall, budget, minimum_tp, maximum_alerts
+):
+    from forpost_prediction_core import training
+
+    assert hasattr(training, "profile_budget_feasibility")
+    evidence = training.profile_budget_feasibility(
+        positives, negatives, minimum_recall=recall, maximum_alert_rate=budget
+    )
+    assert evidence == {
+        "minimum_true_positives": minimum_tp,
+        "maximum_alerts": maximum_alerts,
+        "feasible": False,
+    }
+
+
 @pytest.mark.parametrize("backend", ["catboost", "lightgbm"])
 def test_training_rejects_unavailable_native_candidate_without_fallback(backend, monkeypatch):
     import sys
@@ -197,7 +255,10 @@ def test_training_rejects_unavailable_native_candidate_without_fallback(backend,
             label_column="label",
             time_column="cutoff",
             config=TrainingConfig(
-                purge_hours=0, minimum_positive_examples=1, minimum_negative_examples=1
+                purge_hours=0,
+                maximum_alert_rate=1.0,
+                minimum_positive_examples=1,
+                minimum_negative_examples=1,
             ),
             evidence=evidence,
         )

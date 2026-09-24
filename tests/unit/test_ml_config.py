@@ -10,8 +10,8 @@ def test_repository_ml_config_is_single_source_for_training_policy():
 
     config = load_ml_config(root / "ml" / "config.yaml")
 
-    assert config.label_strategy == "silence_horizon_proxy"
-    assert config.feature_schema_version == "5"
+    assert config.label_strategy == "cadence_adjusted_silence_horizon_proxy_v2"
+    assert config.feature_schema_version == "6"
     assert config.feature_windows_hours == (1, 6, 24, 72, 168)
     assert config.horizon_hours == 24
     assert config.training.purge_hours >= config.horizon_hours

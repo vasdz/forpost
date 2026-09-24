@@ -58,7 +58,7 @@ def load_ml_config(path: Path) -> MlConfig:
     }
     if not isinstance(payload, dict) or set(payload) != required:
         raise ValueError("ML-конфиг не соответствует фиксированной схеме")
-    if payload["label_strategy"] != "silence_horizon_proxy":
+    if payload["label_strategy"] != "cadence_adjusted_silence_horizon_proxy_v2":
         raise ValueError("Неутверждённая стратегия proxy-разметки")
     for key in ("minimum_validation_folds", "validation_points_per_fold"):
         if type(payload[key]) is not int:

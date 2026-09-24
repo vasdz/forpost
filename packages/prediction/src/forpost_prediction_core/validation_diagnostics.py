@@ -28,7 +28,13 @@ CandidateName = Annotated[
 
 
 def empty_diagnostics() -> dict:
-    return {"step": "development_split", "development": None, "folds": [], "candidates": {}}
+    return {
+        "step": "development_split",
+        "development": None,
+        "folds": [],
+        "profile_feasibility": [],
+        "candidates": {},
+    }
 
 
 class Support(ExactModel):
@@ -65,6 +71,14 @@ class CandidateDiagnostic(ExactModel):
     profiles: dict[ProfileName, ProfileDiagnostic]
 
 
+class ProfileFeasibility(ExactModel):
+    fold_index: Annotated[int, Field(strict=True, ge=1, le=20)]
+    profile: ProfileName
+    minimum_true_positives: Count
+    maximum_alerts: Count
+    feasible: Annotated[bool, Field(strict=True)]
+
+
 class DiagnosticEvidence(ExactModel):
     step: Literal[
         "development_split",
@@ -72,6 +86,7 @@ class DiagnosticEvidence(ExactModel):
         "rolling_split",
         "calibration_split",
         "partition_support",
+        "profile_feasibility",
         "candidate_fit",
         "calibration",
         "validation_selection",
@@ -80,6 +95,7 @@ class DiagnosticEvidence(ExactModel):
     ]
     development: Support | None
     folds: tuple[FoldSupport, ...]
+    profile_feasibility: tuple[ProfileFeasibility, ...]
     candidates: dict[CandidateName, CandidateDiagnostic]
 
 

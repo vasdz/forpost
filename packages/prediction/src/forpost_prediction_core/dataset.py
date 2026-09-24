@@ -22,8 +22,81 @@ def build_sensor_failure_dataset(
     feature_windows_hours: Sequence[int] = DEFAULT_FEATURE_WINDOWS_HOURS,
 ) -> pd.DataFrame:
     """Строит утверждённый proxy-набор тишины без утечки событий после cutoff."""
+    normalized, cutoffs = _prepare_sensor_failure_inputs(
+        events,
+        channels,
+        horizon_hours=horizon_hours,
+        cutoff_count=cutoff_count,
+        minimum_history_events=minimum_history_events,
+        feature_windows_hours=feature_windows_hours,
+    )
+    layout = _build_label_layout(
+        normalized,
+        channels,
+        cutoffs,
+        horizon_hours=horizon_hours,
+        minimum_history_events=minimum_history_events,
+        feature_windows_hours=feature_windows_hours,
+    )
+    frames: list[pd.DataFrame] = []
+    context_before = pd.Timedelta(hours=max(feature_windows_hours))
+    context_after = pd.Timedelta(hours=horizon_hours)
+    for cutoff, cutoff_labels in layout.groupby("prediction_at", sort=False):
+        context = normalized.loc[
+            (normalized["observed_at"] >= cutoff - context_before)
+            & (normalized["observed_at"] < cutoff + context_after)
+        ]
+        features = build_channel_features(context, channels, cutoff, windows=feature_windows_hours)
+        frame = features.merge(cutoff_labels.drop(columns="prediction_at"), on="channel_id")
+        frame["prediction_at"] = cutoff
+        frame["evidence_tier"] = "proxy"
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True).sort_values(
+        ["prediction_at", "channel_id"], kind="stable", ignore_index=True
+    )
+
+
+def build_sensor_failure_label_layout(
+    events: pd.DataFrame,
+    channels: pd.DataFrame,
+    *,
+    horizon_hours: int = 24,
+    cutoff_count: int = 12,
+    minimum_history_events: int = 3,
+    feature_windows_hours: Sequence[int] = DEFAULT_FEATURE_WINDOWS_HOURS,
+) -> pd.DataFrame:
+    """Строит только зрелые proxy-лейблы для проверки layout до расчёта признаков."""
+    normalized, cutoffs = _prepare_sensor_failure_inputs(
+        events,
+        channels,
+        horizon_hours=horizon_hours,
+        cutoff_count=cutoff_count,
+        minimum_history_events=minimum_history_events,
+        feature_windows_hours=feature_windows_hours,
+    )
+    return _build_label_layout(
+        normalized,
+        channels,
+        cutoffs,
+        horizon_hours=horizon_hours,
+        minimum_history_events=minimum_history_events,
+        feature_windows_hours=feature_windows_hours,
+    )
+
+
+def _prepare_sensor_failure_inputs(
+    events: pd.DataFrame,
+    channels: pd.DataFrame,
+    *,
+    horizon_hours: int,
+    cutoff_count: int,
+    minimum_history_events: int,
+    feature_windows_hours: Sequence[int],
+) -> tuple[pd.DataFrame, pd.DatetimeIndex]:
     if horizon_hours < 1 or cutoff_count < 2 or minimum_history_events < 1:
         raise ValueError("Параметры временного набора должны быть положительными")
+    if not feature_windows_hours or any(window < 1 for window in feature_windows_hours):
+        raise ValueError("Окна признаков должны быть положительными")
     required_events = {"channel_id", "observed_at", "sensor_value"}
     if not required_events.issubset(events) or "channel_id" not in channels:
         raise ValueError("Источники не содержат обязательные поля ML")
@@ -68,6 +141,18 @@ def build_sensor_failure_dataset(
         cutoff_ns = np.linspace(first.value, last.value, cutoff_count, dtype=np.int64)
         cutoffs = pd.to_datetime(np.unique(cutoff_ns), utc=True)
 
+    return normalized, cutoffs
+
+
+def _build_label_layout(
+    normalized: pd.DataFrame,
+    channels: pd.DataFrame,
+    cutoffs: pd.DatetimeIndex,
+    *,
+    horizon_hours: int,
+    minimum_history_events: int,
+    feature_windows_hours: Sequence[int],
+) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     context_before = pd.Timedelta(hours=max(feature_windows_hours))
     context_after = pd.Timedelta(hours=horizon_hours)
@@ -80,13 +165,14 @@ def build_sensor_failure_dataset(
         eligible_channels = set(history_counts[history_counts >= minimum_history_events].index)
         if not eligible_channels:
             continue
-        features = build_channel_features(context, channels, cutoff, windows=feature_windows_hours)
         labels = label_silence_horizon(context, channels, cutoff, horizon_hours=horizon_hours)
-        frame = features.merge(labels, on="channel_id", how="inner")
-        frame = frame.loc[frame["channel_id"].isin(eligible_channels)].copy()
-        frame["prediction_at"] = cutoff
-        frame["evidence_tier"] = "proxy"
-        frames.append(frame)
+        labels = labels.loc[
+            labels["channel_id"].isin(eligible_channels), ["channel_id", "silence_label"]
+        ].copy()
+        if labels.empty:
+            continue
+        labels["prediction_at"] = cutoff
+        frames.append(labels)
     if not frames:
         raise ValueError("Недостаточно истории для point-in-time набора")
     return pd.concat(frames, ignore_index=True).sort_values(

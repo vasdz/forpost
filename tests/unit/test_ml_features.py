@@ -358,28 +358,169 @@ def test_channel_without_recent_events_gets_zero_recent_pattern_features() -> No
     assert result.loc[0, "value_slope_per_hour"] == 0.0
 
 
-def test_silence_label_uses_only_the_declared_future_horizon() -> None:
-    """Ловит подмену horizon-лейбла событием за границей окна."""
-    cutoff = pd.Timestamp("2025-01-02 00:00:00")
-    events = pd.DataFrame(
+def test_future_rows_cannot_change_the_expected_cadence() -> None:
+    """Ловит оценку индивидуального cadence по строкам после cutoff."""
+    cutoff = pd.Timestamp("2025-01-01T06:15:00Z")
+    history = pd.DataFrame(
         {
-            "channel_id": ["active", "silent", "late"],
-            "observed_at": [
-                cutoff + timedelta(hours=1),
-                cutoff - timedelta(hours=1),
-                cutoff + timedelta(hours=25),
-            ],
+            "channel_id": ["a"] * 4,
+            "observed_at": pd.to_datetime(
+                [
+                    "2025-01-01T00:00:00Z",
+                    "2025-01-01T02:00:00Z",
+                    "2025-01-01T04:00:00Z",
+                    "2025-01-01T06:00:00Z",
+                ]
+            ),
+            "analysis_eligible": [True] * 4,
         }
     )
-    channels = pd.DataFrame({"channel_id": ["active", "silent", "late"]})
+    first_future = pd.DataFrame(
+        {
+            "channel_id": ["a"],
+            "observed_at": [pd.Timestamp("2025-01-01T09:00:00Z")],
+            "analysis_eligible": [True],
+        }
+    )
+    later_burst = pd.DataFrame(
+        {
+            "channel_id": ["a"] * 4,
+            "observed_at": pd.date_range("2025-01-01T09:01:00Z", periods=4, freq="min"),
+            "analysis_eligible": [True] * 4,
+        }
+    )
+    channels = pd.DataFrame({"channel_id": ["a"]})
 
-    labels = label_silence_horizon(events, channels, cutoff, horizon_hours=24)
+    baseline = label_silence_horizon(
+        pd.concat([history, first_future], ignore_index=True),
+        channels,
+        cutoff,
+        horizon_hours=24,
+    )
+    enriched = label_silence_horizon(
+        pd.concat([history, first_future, later_burst], ignore_index=True),
+        channels,
+        cutoff,
+        horizon_hours=24,
+    )
 
-    assert labels.set_index("channel_id")["silence_label"].to_dict() == {
-        "active": 0,
-        "silent": 1,
-        "late": 1,
-    }
+    assert baseline.loc[0, "expected_cadence_hours"] == pytest.approx(2.0)
+    assert enriched.loc[0, "expected_cadence_hours"] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    [
+        ["2025-01-01T00:00:00Z", "2025-01-01T08:00:00Z", "2025-01-01T16:00:00Z"],
+        [
+            "2025-01-01T00:00:00Z",
+            "2025-01-01T01:00:00Z",
+            "2025-01-01T09:00:00Z",
+            "2025-01-01T10:00:00Z",
+        ],
+    ],
+)
+def test_sparse_or_unstable_periodic_channel_is_censored(observed_at) -> None:
+    """Ловит принудительную разметку при недостаточной или нестабильной истории."""
+    events = pd.DataFrame(
+        {
+            "channel_id": ["a"] * len(observed_at),
+            "observed_at": pd.to_datetime(observed_at),
+            "analysis_eligible": [True] * len(observed_at),
+        }
+    )
+
+    labels = label_silence_horizon(
+        events,
+        pd.DataFrame({"channel_id": ["a"]}),
+        pd.Timestamp("2025-01-01T10:30:00Z"),
+        horizon_hours=24,
+    )
+
+    assert labels.empty
+
+
+@pytest.mark.parametrize(
+    ("future_at", "expected_label"),
+    [("2025-01-01T04:00:00Z", 0), ("2025-01-01T06:00:00Z", 1)],
+)
+def test_cadence_deadline_distinguishes_timely_and_overdue_observations(
+    future_at, expected_label
+) -> None:
+    """Ловит fixed-horizon silence вместо индивидуального зрелого deadline."""
+    events = pd.DataFrame(
+        {
+            "channel_id": ["a"] * 5,
+            "observed_at": pd.to_datetime(
+                [
+                    "2025-01-01T00:00:00Z",
+                    "2025-01-01T01:00:00Z",
+                    "2025-01-01T02:00:00Z",
+                    "2025-01-01T03:00:00Z",
+                    future_at,
+                ]
+            ),
+            "analysis_eligible": [True] * 5,
+        }
+    )
+
+    labels = label_silence_horizon(
+        events,
+        pd.DataFrame({"channel_id": ["a"]}),
+        pd.Timestamp("2025-01-01T03:06:00Z"),
+        horizon_hours=24,
+    )
+
+    assert labels.loc[0, "silence_label"] == expected_label
+
+
+def test_ineligible_migration_event_does_not_satisfy_cadence_deadline() -> None:
+    """Ловит использование миграционной записи как своевременной телеметрии."""
+    events = pd.DataFrame(
+        {
+            "channel_id": ["a"] * 6,
+            "observed_at": pd.to_datetime(
+                [
+                    "2025-01-01T00:00:00Z",
+                    "2025-01-01T01:00:00Z",
+                    "2025-01-01T02:00:00Z",
+                    "2025-01-01T03:00:00Z",
+                    "2025-01-01T04:00:00Z",
+                    "2025-01-01T06:00:00Z",
+                ]
+            ),
+            "analysis_eligible": [True, True, True, True, False, True],
+        }
+    )
+
+    labels = label_silence_horizon(
+        events,
+        pd.DataFrame({"channel_id": ["a"]}),
+        pd.Timestamp("2025-01-01T03:06:00Z"),
+        horizon_hours=24,
+    )
+
+    assert labels.loc[0, "silence_label"] == 1
+
+
+def test_expected_observation_outside_horizon_is_censored() -> None:
+    """Ловит отрицательный лейбл для исхода, который не может созреть за horizon."""
+    events = pd.DataFrame(
+        {
+            "channel_id": ["a"] * 4,
+            "observed_at": pd.date_range("2025-01-01", periods=4, freq="20h", tz="UTC"),
+            "analysis_eligible": [True] * 4,
+        }
+    )
+
+    labels = label_silence_horizon(
+        events,
+        pd.DataFrame({"channel_id": ["a"]}),
+        pd.Timestamp("2025-01-03T12:06:00Z"),
+        horizon_hours=24,
+    )
+
+    assert labels.empty
 
 
 def test_temporal_split_keeps_future_rows_out_of_training() -> None:

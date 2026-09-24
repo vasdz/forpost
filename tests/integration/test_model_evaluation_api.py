@@ -91,8 +91,8 @@ def test_valid_evidence_never_authorizes_predictions(client, evaluation_route, s
     }
     payload = {
         "format_version": 2,
-        "task_semantics": "risk_of_telemetry_silence_within_horizon",
-        "feature_schema_version": "5",
+        "task_semantics": "risk_of_unexpected_telemetry_silence_within_horizon",
+        "feature_schema_version": "6",
         "config_sha256": "a" * 64,
         "library_versions": dict.fromkeys(
             ("numpy", "pandas", "scikit-learn", "skops", "catboost", "lightgbm"), "1.0"
@@ -104,7 +104,7 @@ def test_valid_evidence_never_authorizes_predictions(client, evaluation_route, s
         "version": "v1",
         "status": status,
         "evidence_tier": "proxy",
-        "label_strategy": "silence_horizon_proxy",
+        "label_strategy": "cadence_adjusted_silence_horizon_proxy_v2",
         "horizon_hours": 48,
         "created_at": "2026-09-21T10:00:00Z",
         "reason_code": "validation_rejected",

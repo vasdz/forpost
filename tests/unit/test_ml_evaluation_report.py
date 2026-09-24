@@ -36,7 +36,7 @@ def report_payload(status="rejected"):
         "version": "v1",
         "status": status,
         "evidence_tier": "proxy",
-        "label_strategy": "silence_horizon_proxy",
+        "label_strategy": "cadence_adjusted_silence_horizon_proxy_v2",
         "horizon_hours": 48,
         "created_at": "2026-09-21T10:00:00Z",
         "reason_code": "validation_rejected" if status == "rejected" else None,
@@ -54,8 +54,8 @@ def report_payload(status="rejected"):
         "test_metrics": metrics if status == "published" else None,
         "threshold": 0.6 if status == "published" else None,
         "champion_name": "extra_trees_isotonic" if status == "published" else None,
-        "task_semantics": "risk_of_telemetry_silence_within_horizon",
-        "feature_schema_version": "5",
+        "task_semantics": "risk_of_unexpected_telemetry_silence_within_horizon",
+        "feature_schema_version": "6",
         "config_sha256": "a" * 64,
         "library_versions": dict.fromkeys(
             ("numpy", "pandas", "scikit-learn", "skops", "catboost", "lightgbm"), "1.0"
@@ -311,8 +311,18 @@ def test_validation_rejection_records_evidence_without_evaluating_test(monkeypat
             config=training.TrainingConfig(
                 purge_hours=0,
                 minimum_precision=1.0,
+                maximum_alert_rate=1.0,
                 minimum_positive_examples=1,
                 minimum_negative_examples=1,
+                operating_profiles=tuple(
+                    training.ProfileConstraints(
+                        name=name,
+                        minimum_precision=1.0,
+                        minimum_recall=0.5,
+                        maximum_alert_rate=1.0,
+                    )
+                    for name in ("high_precision", "balanced", "high_recall")
+                ),
             ),
             evidence=evidence,
         )
@@ -375,7 +385,7 @@ def command(tmp_path, monkeypatch):
         cutoff_count=80,
         feature_windows_hours=(24,),
         feature_schema_version="sensor-failure-v1",
-        label_strategy="silence_horizon_proxy",
+        label_strategy="cadence_adjusted_silence_horizon_proxy_v2",
         sha256="a" * 64,
         training=TrainingConfig(
             purge_hours=48,
@@ -423,7 +433,7 @@ def test_command_writes_published_report_only_after_real_release(command, report
     assert (
         report.task_semantics
         == card["task_semantics"]
-        == "risk_of_telemetry_silence_within_horizon"
+        == "risk_of_unexpected_telemetry_silence_within_horizon"
     )
     assert len(report.rolling_folds) == 3
     assert set(report.operating_profiles) == {"high_precision", "balanced", "high_recall"}

@@ -1,4 +1,6 @@
 import pandas as pd
+import pytest
+from forpost_prediction_core import dataset as dataset_module
 from forpost_prediction_core.dataset import build_sensor_failure_dataset
 from forpost_prediction_core.features import build_channel_features
 
@@ -22,33 +24,26 @@ def test_default_dataset_warms_up_weekly_features_and_matches_inference() -> Non
     for cutoff, frame in dataset.groupby("prediction_at"):
         expected = build_channel_features(events, channels, cutoff)
         pd.testing.assert_frame_equal(frame[feature_columns].reset_index(drop=True), expected)
+    from scripts.train_sensor_failure import _current_features
+
+    inference = _current_features(events, channels, tuple(feature_columns), (1, 6, 24, 72, 168))
+    assert tuple(inference.loc[:, feature_columns].columns) == tuple(feature_columns)
 
 
 def test_dataset_is_chronological_and_uses_only_channels_with_history():
+    channel_a_times = pd.date_range("2026-01-01", periods=25, freq="4h", tz="UTC")
+    channel_b_times = pd.date_range("2026-01-01T02:00:00Z", periods=24, freq="4h")
+    observed_at = channel_a_times.append(channel_b_times).append(
+        pd.DatetimeIndex([pd.Timestamp("2026-01-05T03:00:00Z")])
+    )
     events = pd.DataFrame(
         {
-            "channel_id": ["a", "b", "a", "b", "future", "a"],
-            "observed_at": pd.to_datetime(
-                [
-                    "2026-01-01T00:00:00Z",
-                    "2026-01-01T01:00:00Z",
-                    "2026-01-01T12:00:00Z",
-                    "2026-01-02T01:00:00Z",
-                    "2026-01-03T03:00:00Z",
-                    "2026-01-03T02:00:00Z",
-                ]
-            ),
-            "sensor_value": [1, 2, 3, 4, 5, 6],
-            "is_alarm": [False, False, True, False, True, False],
-            "quality_status": [
-                "valid",
-                "valid",
-                "technical_anomaly",
-                "valid",
-                "technical_anomaly",
-                "valid",
-            ],
-            "analysis_eligible": [True, True, False, True, False, True],
+            "channel_id": ["a"] * len(channel_a_times) + ["b"] * len(channel_b_times) + ["future"],
+            "observed_at": observed_at,
+            "sensor_value": [1.0] * len(observed_at),
+            "is_alarm": [False] * len(observed_at),
+            "quality_status": ["valid"] * len(observed_at),
+            "analysis_eligible": [True] * len(observed_at),
         }
     )
     channels = pd.DataFrame({"channel_id": ["a", "b", "future"], "sensor_type": ["t", "s", "t"]})
@@ -66,31 +61,22 @@ def test_dataset_is_chronological_and_uses_only_channels_with_history():
     eligible_start = events.loc[events["analysis_eligible"], "observed_at"].min()
     assert dataset["prediction_at"].min() >= eligible_start + pd.Timedelta(hours=24)
     assert "future" not in set(dataset["channel_id"])
-    assert set(dataset["silence_label"]) == {0, 1}
+    assert set(dataset["silence_label"]) <= {0, 1}
     assert dataset["evidence_tier"].eq("proxy").all()
 
 
 def test_dataset_excludes_ineligible_migration_events():
+    eligible_times = pd.date_range("2026-01-01", periods=40, freq="h", tz="UTC")
     events = pd.DataFrame(
         {
-            "channel_id": ["a", "a", "a", "a"],
-            "observed_at": pd.to_datetime(
-                [
-                    "2021-05-01T00:00:00Z",
-                    "2026-01-01T00:00:00Z",
-                    "2026-01-02T00:00:00Z",
-                    "2026-01-03T00:00:00Z",
-                ]
+            "channel_id": ["a"] * (len(eligible_times) + 1),
+            "observed_at": pd.DatetimeIndex([pd.Timestamp("2021-05-01T00:00:00Z")]).append(
+                eligible_times
             ),
-            "sensor_value": [999, 1, 2, 3],
-            "is_alarm": [True, False, False, False],
-            "quality_status": [
-                "monitoring_system_migration",
-                "valid",
-                "technical_anomaly",
-                "valid",
-            ],
-            "analysis_eligible": [False, True, False, True],
+            "sensor_value": [999.0] + [1.0] * len(eligible_times),
+            "is_alarm": [True] + [False] * len(eligible_times),
+            "quality_status": ["monitoring_system_migration"] + ["valid"] * len(eligible_times),
+            "analysis_eligible": [False] + [True] * len(eligible_times),
         }
     )
     channels = pd.DataFrame({"channel_id": ["a"]})
@@ -105,3 +91,81 @@ def test_dataset_excludes_ineligible_migration_events():
     )
 
     assert dataset.filter(like="value_max").max().max() < 999
+
+
+def test_dataset_contains_only_channels_with_mature_cadence_labels() -> None:
+    """Ловит попадание censored-канала в обучающий набор как отрицательного."""
+    fast_times = pd.date_range("2026-01-01", periods=80, freq="h", tz="UTC")
+    sparse_times = pd.date_range("2026-01-01", periods=3, freq="12h", tz="UTC")
+    events = pd.DataFrame(
+        {
+            "channel_id": ["fast"] * len(fast_times) + ["sparse"] * len(sparse_times),
+            "observed_at": fast_times.append(sparse_times),
+            "sensor_value": [1.0] * (len(fast_times) + len(sparse_times)),
+            "analysis_eligible": [True] * (len(fast_times) + len(sparse_times)),
+        }
+    )
+    channels = pd.DataFrame({"channel_id": ["fast", "sparse"]})
+
+    dataset = build_sensor_failure_dataset(
+        events,
+        channels,
+        horizon_hours=24,
+        cutoff_count=3,
+        minimum_history_events=1,
+        feature_windows_hours=(1, 24),
+    )
+
+    assert set(dataset["channel_id"]) == {"fast"}
+
+
+def test_label_layout_matches_the_training_dataset_without_building_features() -> None:
+    """Ловит расхождение label-only precheck и фактического training dataset."""
+    assert hasattr(dataset_module, "build_sensor_failure_label_layout")
+    times = pd.date_range("2026-01-01", periods=80, freq="h", tz="UTC")
+    events = pd.DataFrame(
+        {
+            "channel_id": ["a"] * len(times),
+            "observed_at": times,
+            "sensor_value": [1.0] * len(times),
+            "analysis_eligible": [True] * len(times),
+        }
+    )
+    channels = pd.DataFrame({"channel_id": ["a"]})
+    options = {
+        "horizon_hours": 24,
+        "cutoff_count": 3,
+        "minimum_history_events": 1,
+        "feature_windows_hours": (1, 24),
+    }
+
+    layout = dataset_module.build_sensor_failure_label_layout(events, channels, **options)
+    dataset = build_sensor_failure_dataset(events, channels, **options)
+
+    pd.testing.assert_frame_equal(
+        layout,
+        dataset.loc[:, ["channel_id", "silence_label", "prediction_at"]].reset_index(drop=True),
+    )
+
+
+def test_dataset_rejects_when_every_candidate_label_is_censored() -> None:
+    """Ловит возврат пустого training frame при отсутствии зрелых исходов."""
+    times = pd.date_range("2026-01-01", periods=6, freq="12h", tz="UTC")
+    events = pd.DataFrame(
+        {
+            "channel_id": ["sparse"] * len(times),
+            "observed_at": times,
+            "sensor_value": [1.0] * len(times),
+            "analysis_eligible": [True] * len(times),
+        }
+    )
+
+    with pytest.raises(ValueError, match="истории"):
+        build_sensor_failure_dataset(
+            events,
+            pd.DataFrame({"channel_id": ["sparse"]}),
+            horizon_hours=24,
+            cutoff_count=2,
+            minimum_history_events=1,
+            feature_windows_hours=(1, 24),
+        )

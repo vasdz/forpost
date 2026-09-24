@@ -300,7 +300,9 @@ type Prediction = {
   имеет `simulated` provenance; эти уровни не отображаются как рабочий прогноз
   текущего диспетчерского интерфейса;
 - текущий `sensor_failure` использует только `evidence_tier: proxy` и
-  `label_strategy: silence_horizon_proxy`; физический отказ им не доказан;
+  `label_strategy: cadence_adjusted_silence_horizon_proxy_v2`; он оценивает
+  риск неожиданного прекращения ожидаемой телеметрии относительно
+  индивидуального cadence, а физический отказ им не доказан;
 - статус `passed` требует строго `precision > 0.70` и `recall > 0.50` на
   финальном temporal holdout; равенство порогу не считается прохождением;
 - `predicted_at` передаётся в ISO 8601 с часовым поясом;

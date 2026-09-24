@@ -18,7 +18,7 @@ EvaluationHorizonHours = Annotated[int, Field(strict=True, gt=0, le=8760)]
 Sha256 = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
 EvidenceString = Annotated[str, Field(strict=True, min_length=1, max_length=128)]
 ProfileName = Literal["high_precision", "balanced", "high_recall"]
-TaskSemantics = Literal["risk_of_telemetry_silence_within_horizon"]
+TaskSemantics = Literal["risk_of_unexpected_telemetry_silence_within_horizon"]
 LIBRARY_NAMES = frozenset({"numpy", "pandas", "scikit-learn", "skops", "catboost", "lightgbm"})
 ReasonCode = Literal[
     "configuration_invalid",
@@ -207,7 +207,7 @@ class EvaluationReport(ValidationEvidence):
     version: EvaluationVersion
     status: Literal["rejected", "published"]
     evidence_tier: Literal["proxy"]
-    label_strategy: Literal["silence_horizon_proxy"]
+    label_strategy: Literal["cadence_adjusted_silence_horizon_proxy_v2"]
     horizon_hours: EvaluationHorizonHours | None
     created_at: AwareDatetime
     reason_code: ReasonCode | None
