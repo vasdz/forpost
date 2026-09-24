@@ -529,6 +529,17 @@ def test_derived_dataset_cache_requires_both_config_and_source_fingerprints(comm
     )
 
 
+def test_derived_dataset_cache_paths_are_isolated_by_release_version(command, tmp_path):
+    module, _arguments, _config = command
+    report_path = tmp_path / "ml-evaluation.json"
+
+    v6_paths = module._dataset_cache_paths(report_path, "v6")
+    v7_paths = module._dataset_cache_paths(report_path, "v7")
+
+    assert set(v6_paths).isdisjoint(v7_paths)
+    assert all(path.parent == report_path.parent for path in (*v6_paths, *v7_paths))
+
+
 @pytest.mark.parametrize(
     ("stage", "reason"),
     [("rolling_validation", "validation_rejected"), ("frozen_test", "test_rejected")],

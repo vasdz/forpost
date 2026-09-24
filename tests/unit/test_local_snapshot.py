@@ -4,6 +4,8 @@ import json
 import sqlite3
 import subprocess
 import sys
+from bisect import bisect_right
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -259,18 +261,18 @@ def test_training_calendar_density_increase_preserves_existing_anchors(tmp_path)
 
     baseline = local_snapshot._calendar_cutoffs_from_partitions(
         journals,
-        cutoff_count=18,
+        cutoff_count=64,
         context_before_hours=168,
         context_after_hours=24,
     )
     expanded = local_snapshot._calendar_cutoffs_from_partitions(
         journals,
-        cutoff_count=64,
+        cutoff_count=192,
         context_before_hours=168,
         context_after_hours=24,
     )
 
-    assert len(expanded) == 64
+    assert len(expanded) == 192
     assert set(baseline).issubset(expanded)
     assert expanded == tuple(sorted(expanded))
 
@@ -431,8 +433,8 @@ def test_training_calendar_spools_total_above_per_context_limit(monkeypatch, tmp
     assert spool_path is not None and not spool_path.exists()
 
 
-def test_training_calendar_spool_uses_compact_ml_only_schema(monkeypatch, tmp_path):
-    """Ловит возврат raw identifiers и повторяющихся строк в disk spool."""
+def test_training_calendar_spool_uses_compressed_ml_only_blocks(monkeypatch, tmp_path):
+    """Ловит возврат raw identifiers и SQLite-overhead на каждое событие."""
     raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
     write_valid_sources(
         raw_root,
@@ -460,22 +462,24 @@ def test_training_calendar_spool_uses_compact_ml_only_schema(monkeypatch, tmp_pa
         assert window.spool_path is not None
         connection = sqlite3.connect(window.spool_path)
         try:
-            columns = tuple(row[1] for row in connection.execute("PRAGMA table_info(events)"))
+            tables = tuple(
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+                )
+            )
+            columns = tuple(
+                row[1] for row in connection.execute("PRAGMA table_info(context_blocks)")
+            )
             stored = connection.execute(
-                "SELECT channel_index, recorded_second, is_alarm, sensor_value, quality_issue "
-                "FROM events"
+                "SELECT context_index, payload FROM context_blocks"
             ).fetchone()
         finally:
             connection.close()
-        assert columns == (
-            "sequence",
-            "channel_index",
-            "recorded_second",
-            "is_alarm",
-            "sensor_value",
-            "quality_issue",
-        )
+        assert tables == ("context_blocks",)
+        assert columns == ("context_index", "payload")
         assert stored is not None and stored[0] == 0
+        assert b"raw-id-must-not-be-spooled" not in stored[1]
         context = load_training_context(
             window,
             window.prediction_cutoffs[0],
@@ -518,6 +522,94 @@ def test_training_calendar_uses_sorted_interval_lookup_not_repeated_masks(monkey
     )
 
     cleanup_training_window(window)
+
+
+def test_training_calendar_uses_larger_bounded_csv_chunks(monkeypatch, tmp_path):
+    """Ловит возврат к мелким чанкам, делающим full-calendar ingestion CPU-bound."""
+    import forpost_connectors.local_snapshot as local_snapshot
+
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(raw_root)
+    original_read_csv = pd.read_csv
+    chunk_sizes = []
+
+    def observed_read_csv(*args, **kwargs):
+        if "chunksize" in kwargs:
+            chunk_sizes.append(kwargs["chunksize"])
+        return original_read_csv(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", observed_read_csv)
+    window = load_training_window(
+        raw_root,
+        max_events=10,
+        cutoff_count=2,
+        context_before_hours=1,
+        context_after_hours=1,
+    )
+    try:
+        assert local_snapshot.TRAINING_EVENT_CHUNK_ROWS in chunk_sizes
+        assert local_snapshot.TRAINING_EVENT_CHUNK_ROWS > local_snapshot.EVENT_CHUNK_ROWS
+    finally:
+        cleanup_training_window(window)
+
+
+def test_vectorized_training_blocks_match_scalar_reference_at_boundaries():
+    """Проверяет точную эквивалентность vectorized assignment скалярному контракту."""
+    import forpost_connectors.local_snapshot as local_snapshot
+
+    intervals = (
+        (datetime(2026, 1, 1, 0), datetime(2026, 1, 1, 2)),
+        (datetime(2026, 1, 1, 4), datetime(2026, 1, 1, 6)),
+    )
+    origin = datetime(2026, 1, 1)
+    times = tuple(origin + timedelta(hours=hour) for hour in (-1, 0, 2, 3, 4, 6, 7))
+    chunk = pd.DataFrame(
+        {
+            "ид_канала_данных": ["20", "20", "20", "20", "20", "20", "unknown"],
+            "тревожное": ["0", "1", "нет", "0", "да", "0", "0"],
+            "значение_датчика": ["1", "2", "3", "4", "-127", "6", "7"],
+        }
+    )
+    timestamps = pd.Series(pd.to_datetime(times), index=chunk.index)
+
+    blocks, counts = local_snapshot._encode_training_blocks(
+        chunk,
+        timestamps,
+        context_intervals=intervals,
+        channel_indexes={"20": 0},
+    )
+    actual = {
+        context_index: tuple(local_snapshot.TRAINING_EVENT_RECORD.iter_unpack(payload))
+        for context_index, payload in blocks.items()
+    }
+
+    expected: dict[int, list[tuple[int, int, int, float, int]]] = {}
+    starts = tuple(start for start, _ in intervals)
+    for index, recorded_at in timestamps.items():
+        context_index = bisect_right(starts, recorded_at) - 1
+        if context_index < 0 or recorded_at > intervals[context_index][1]:
+            continue
+        channel_index = {"20": 0}.get(chunk.at[index, "ид_канала_данных"])
+        if channel_index is None:
+            continue
+        alarm = local_snapshot._parse_alarm(chunk.at[index, "тревожное"])
+        quality, eligible = local_snapshot._classify_event_quality(
+            chunk.at[index, "значение_датчика"], alarm, recorded_at
+        )
+        if not eligible:
+            continue
+        expected.setdefault(context_index, []).append(
+            (
+                channel_index,
+                local_snapshot._calendar_second(recorded_at),
+                -1 if alarm is None else int(alarm),
+                float(chunk.at[index, "значение_датчика"]),
+                int(quality != "valid"),
+            )
+        )
+
+    assert actual == {key: tuple(value) for key, value in expected.items()}
+    assert counts == (2, 2)
 
 
 def test_training_calendar_rejects_extra_csv_fields_in_single_pass(monkeypatch, tmp_path):

@@ -8,8 +8,9 @@ import heapq
 import json
 import re
 import sqlite3
+import struct
 import warnings
-from bisect import bisect_right
+import zlib
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,7 @@ from tempfile import NamedTemporaryFile, gettempdir
 from threading import Lock
 from typing import Final
 
+import numpy as np
 import pandas as pd
 
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[4]
@@ -38,8 +40,29 @@ MAX_CSV_TOTAL_ROWS: Final[int] = 8_500_000
 MAX_TRAINING_SOURCE_ROWS: Final[int] = MAX_CSV_ROWS * MAX_CSV_FILES
 MAX_CSV_FIELD_CHARS: Final[int] = 1_024
 EVENT_CHUNK_ROWS: Final[int] = 10_000
+TRAINING_EVENT_CHUNK_ROWS: Final[int] = 100_000
 # Первая прошедшая проверку календарная сетка остаётся частью всех более плотных сеток.
 STABLE_CALENDAR_BASE_CUTOFFS: Final[int] = 18
+TRAINING_EVENT_RECORD: Final[struct.Struct] = struct.Struct("<IqbdB")
+TRAINING_EVENT_DTYPE: Final[np.dtype] = np.dtype(
+    [
+        ("channel_index", "<u4"),
+        ("recorded_second", "<i8"),
+        ("alarm_code", "i1"),
+        ("sensor_value", "<f8"),
+        ("quality_issue", "u1"),
+    ],
+    align=False,
+)
+TRUE_ALARM_VALUES: Final[frozenset[str]] = frozenset(
+    {"1", "true", "да", "yes", "on", "тревога", "истина", "есть"}
+)
+FALSE_ALARM_VALUES: Final[frozenset[str]] = frozenset(
+    {"0", "false", "нет", "no", "off", "норма", "ложь", "нет тревоги"}
+)
+TECHNICAL_SENSOR_VALUES: Final[frozenset[str]] = frozenset(
+    {"-3276", "-127", "-100", "-255", "01.01.1970 03:00:00", "1970-01-01t03:00:00"}
+)
 # Должен совпадать с максимумом, который принимает Next.js-маршрут снимка.
 MAX_PUBLIC_SNAPSHOT_BYTES: Final[int] = 8 * 1024 * 1024
 YEAR_IN_FILENAME: Final[re.Pattern[str]] = re.compile(r"(?:^|[-_])(\d{4})(?:[-_.]|$)")
@@ -272,15 +295,13 @@ def load_training_context(
     cutoff_at = datetime.fromisoformat(cutoff)
     start = _calendar_second(cutoff_at - timedelta(hours=context_before_hours))
     end = _calendar_second(cutoff_at + timedelta(hours=context_after_hours))
+    context_index = window.prediction_cutoffs.index(cutoff)
     channel_ids = tuple(channel.channel_id for channel in window.channels)
     try:
         connection = sqlite3.connect(f"file:{window.spool_path.as_posix()}?mode=ro", uri=True)
         rows = connection.execute(
-            """SELECT sequence, channel_index, recorded_second, is_alarm,
-                      sensor_value, quality_issue
-               FROM events WHERE recorded_second >= ? AND recorded_second <= ?
-               ORDER BY recorded_second DESC, sequence DESC""",
-            (start, end),
+            "SELECT payload FROM context_blocks WHERE context_index = ?",
+            (context_index,),
         ).fetchall()
     except sqlite3.Error as error:
         raise SourceSnapshotError(
@@ -289,17 +310,29 @@ def load_training_context(
     finally:
         if "connection" in locals():
             connection.close()
+    try:
+        decoded = [
+            record
+            for (payload,) in rows
+            for record in TRAINING_EVENT_RECORD.iter_unpack(zlib.decompress(payload))
+        ]
+    except (struct.error, zlib.error) as error:
+        raise SourceSnapshotError(
+            "Контекст обучения повреждён", diagnostic_code="calendar_spool_corrupt"
+        ) from error
+    decoded.sort(key=lambda record: record[1], reverse=True)
     return tuple(
         TrainingContextEvent(
-            channel_id=channel_ids[row[1]],
-            recorded_at=(datetime(1970, 1, 1) + timedelta(seconds=row[2])).isoformat(
+            channel_id=channel_ids[channel_index],
+            recorded_at=(datetime(1970, 1, 1) + timedelta(seconds=recorded_second)).isoformat(
                 timespec="seconds"
             ),
-            is_alarm=None if row[3] is None else bool(row[3]),
-            sensor_value="" if row[4] is None else format(row[4], ".17g"),
-            quality_code="alarm_with_technical_value" if row[5] else "valid",
+            is_alarm=None if alarm_code < 0 else bool(alarm_code),
+            sensor_value="" if pd.isna(sensor_value) else format(sensor_value, ".17g"),
+            quality_code="alarm_with_technical_value" if quality_issue else "valid",
         )
-        for row in rows
+        for channel_index, recorded_second, alarm_code, sensor_value, quality_issue in decoded
+        if start <= recorded_second <= end and channel_index < len(channel_ids)
     )
 
 
@@ -413,9 +446,9 @@ def _spool_calendar_events(
 ) -> tuple[Path, int, int, int]:
     scanned = 0
     skipped = 0
-    sequence = 0
+    selected = 0
     context_counts = [0] * len(context_intervals)
-    context_starts, context_ends = _non_overlapping_context_bounds(context_intervals)
+    _non_overlapping_context_bounds(context_intervals)
     allowed_dates = _calendar_date_literals(intervals)
     with NamedTemporaryFile(
         prefix="forpost-ml-calendar-", suffix=".sqlite3", delete=False
@@ -426,13 +459,9 @@ def _spool_calendar_events(
         connection.execute("PRAGMA journal_mode=OFF")
         connection.execute("PRAGMA synchronous=OFF")
         connection.execute(
-            """CREATE TABLE events (
-                sequence INTEGER PRIMARY KEY,
-                channel_index INTEGER NOT NULL,
-                recorded_second INTEGER NOT NULL,
-                is_alarm INTEGER,
-                sensor_value REAL,
-                quality_issue INTEGER NOT NULL
+            """CREATE TABLE context_blocks (
+                context_index INTEGER NOT NULL,
+                payload BLOB NOT NULL
             )"""
         )
         for path in journals:
@@ -441,7 +470,11 @@ def _spool_calendar_events(
                 start.year <= expected_year <= end.year for start, end in intervals
             ):
                 continue
-            for chunk in _read_event_chunks(path, validate_rows=False):
+            for chunk in _read_event_chunks(
+                path,
+                validate_rows=False,
+                chunk_rows=TRAINING_EVENT_CHUNK_ROWS,
+            ):
                 scanned += len(chunk)
                 if scanned > MAX_TRAINING_SOURCE_ROWS:
                     raise SourceSnapshotError(
@@ -455,53 +488,34 @@ def _spool_calendar_events(
                     selected_chunk, expected_year, quarantine_partition_mismatch=True
                 )
                 skipped += invalid_count
-                numeric_values = pd.to_numeric(
-                    selected_chunk["значение_датчика"], errors="coerce"
-                ).replace([float("inf"), float("-inf")], pd.NA)
-                batch = []
-                for index, timestamp in timestamps.items():
-                    recorded_at = timestamp.to_pydatetime()
-                    context_index = bisect_right(context_starts, recorded_at) - 1
-                    if context_index < 0 or recorded_at > context_ends[context_index]:
-                        continue
-                    channel_id = _required_value(chunk.at[index, "ид_канала_данных"])
-                    channel_index = channel_indexes.get(channel_id)
-                    if channel_index is None:
-                        continue
-                    is_alarm = _parse_alarm(chunk.at[index, "тревожное"])
-                    sensor_value = _required_value(chunk.at[index, "значение_датчика"])
-                    quality_code, analysis_eligible = _classify_event_quality(
-                        sensor_value, is_alarm, recorded_at
-                    )
-                    if not analysis_eligible:
-                        continue
-                    context_counts[context_index] += 1
+                batches, additions = _encode_training_blocks(
+                    selected_chunk,
+                    timestamps,
+                    context_intervals=context_intervals,
+                    channel_indexes=channel_indexes,
+                )
+                for context_index, addition in enumerate(additions):
+                    context_counts[context_index] += addition
                     if context_counts[context_index] > max_events:
                         raise SourceSnapshotError(
                             "Превышен лимит одного календарного контекста обучения",
                             diagnostic_code="calendar_context_event_limit",
                         )
-                    sequence += 1
-                    batch.append(
-                        (
-                            sequence,
-                            channel_index,
-                            _calendar_second(recorded_at),
-                            is_alarm,
-                            (
-                                None
-                                if pd.isna(numeric_values.at[index])
-                                else float(numeric_values.at[index])
-                            ),
-                            quality_code != "valid",
-                        )
-                    )
-                connection.executemany("INSERT INTO events VALUES (?, ?, ?, ?, ?, ?)", batch)
+                selected += sum(additions)
+                connection.executemany(
+                    "INSERT INTO context_blocks VALUES (?, ?)",
+                    (
+                        # Уровень 1 сохраняет существенное сжатие однотипной телеметрии,
+                        # не превращая полный архив в CPU-bound ingestion.
+                        (context_index, zlib.compress(payload, level=1))
+                        for context_index, payload in batches.items()
+                    ),
+                )
                 connection.commit()
-        connection.execute("CREATE INDEX events_recorded_at ON events(recorded_second)")
+        connection.execute("CREATE INDEX context_blocks_index ON context_blocks(context_index)")
         connection.commit()
         connection.close()
-        return spool_path, sequence, scanned, skipped
+        return spool_path, selected, scanned, skipped
     except sqlite3.Error as error:
         if "connection" in locals():
             connection.close()
@@ -520,6 +534,67 @@ def _spool_calendar_events(
 def _calendar_second(value: datetime) -> int:
     """Компактно кодирует локальное wall-clock время без смены временной зоны."""
     return int((value - datetime(1970, 1, 1)).total_seconds())
+
+
+def _encode_training_blocks(
+    chunk: pd.DataFrame,
+    timestamps: pd.Series,
+    *,
+    context_intervals: tuple[tuple[datetime, datetime], ...],
+    channel_indexes: dict[str, int],
+) -> tuple[dict[int, bytes], tuple[int, ...]]:
+    """Векторно назначает события непересекающимся контекстам и кодирует их."""
+    if timestamps.empty:
+        return {}, (0,) * len(context_intervals)
+    context_starts, context_ends = _non_overlapping_context_bounds(context_intervals)
+    seconds = timestamps.to_numpy(dtype="datetime64[s]").astype(np.int64)
+    start_seconds = np.asarray([_calendar_second(value) for value in context_starts])
+    end_seconds = np.asarray([_calendar_second(value) for value in context_ends])
+    context_indices = np.searchsorted(start_seconds, seconds, side="right") - 1
+    safe_indices = np.clip(context_indices, 0, len(context_intervals) - 1)
+    in_context = (context_indices >= 0) & (seconds <= end_seconds[safe_indices])
+
+    selected = chunk.loc[timestamps.index]
+    channel_values = selected["ид_канала_данных"].map(channel_indexes)
+    known_channel = channel_values.notna().to_numpy()
+
+    alarm_text = selected["тревожное"].astype(str).str.strip().str.casefold()
+    alarm_numeric = pd.to_numeric(
+        alarm_text.str.replace(",", ".", regex=False), errors="coerce"
+    ).to_numpy(dtype=float)
+    finite_alarm = np.isfinite(alarm_numeric)
+    alarm_codes = np.full(len(selected), -1, dtype=np.int8)
+    alarm_codes[
+        alarm_text.isin(FALSE_ALARM_VALUES).to_numpy() | (finite_alarm & (alarm_numeric == 0))
+    ] = 0
+    alarm_codes[
+        alarm_text.isin(TRUE_ALARM_VALUES).to_numpy() | (finite_alarm & (alarm_numeric != 0))
+    ] = 1
+
+    sensor_text = selected["значение_датчика"].astype(str).str.strip()
+    technical = sensor_text.str.casefold().isin(TECHNICAL_SENSOR_VALUES).to_numpy()
+    eligible = (
+        in_context
+        & known_channel
+        & timestamps.dt.year.ne(2021).to_numpy()
+        & (~technical | (alarm_codes == 1))
+    )
+    sensor_values = pd.to_numeric(sensor_text, errors="coerce").to_numpy(dtype=float).copy()
+    sensor_values[~np.isfinite(sensor_values)] = np.nan
+
+    records = np.empty(int(eligible.sum()), dtype=TRAINING_EVENT_DTYPE)
+    records["channel_index"] = channel_values.loc[eligible].to_numpy(dtype=np.uint32)
+    records["recorded_second"] = seconds[eligible]
+    records["alarm_code"] = alarm_codes[eligible]
+    records["sensor_value"] = sensor_values[eligible]
+    records["quality_issue"] = technical[eligible]
+    eligible_contexts = context_indices[eligible]
+    counts = np.bincount(eligible_contexts, minlength=len(context_intervals))
+    blocks = {
+        int(context_index): records[eligible_contexts == context_index].tobytes()
+        for context_index in np.flatnonzero(counts)
+    }
+    return blocks, tuple(int(value) for value in counts)
 
 
 def _non_overlapping_context_bounds(
@@ -966,7 +1041,9 @@ def _push_latest(
         heapq.heapreplace(heap, candidate)
 
 
-def _read_event_chunks(path: Path, *, validate_rows: bool = True):
+def _read_event_chunks(
+    path: Path, *, validate_rows: bool = True, chunk_rows: int = EVENT_CHUNK_ROWS
+):
     """Потоково читает журнал C-парсером фиксированными порциями, не сохраняя журнал в памяти."""
     try:
         if validate_rows:
@@ -978,7 +1055,7 @@ def _read_event_chunks(path: Path, *, validate_rows: bool = True):
                 encoding="utf-8-sig",
                 dtype=str,
                 keep_default_na=False,
-                chunksize=EVENT_CHUNK_ROWS,
+                chunksize=chunk_rows,
                 index_col=False,
                 on_bad_lines="error",
             )

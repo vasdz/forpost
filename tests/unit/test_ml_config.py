@@ -14,6 +14,7 @@ def test_repository_ml_config_is_single_source_for_training_policy():
     assert config.feature_schema_version == "6"
     assert config.feature_windows_hours == (1, 6, 24, 72, 168)
     assert config.horizon_hours == 24
+    assert config.cutoff_count == 192
     assert config.training.purge_hours >= config.horizon_hours
     assert config.training.minimum_precision == 0.7
     assert config.training.minimum_recall == 0.5

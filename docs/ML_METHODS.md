@@ -159,18 +159,34 @@ Skops и связь метрик экспорта с test-метриками. П
 Из корня репозитория, после установки локальных Python-зависимостей:
 
 ```powershell
-.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v6
+.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v7
 ```
 
-`v5` использовалась только для development-only sweep и bundle не создала.
-После запуска указанной материальной попытки следующая версия — `v7`, `v8` и
-далее. Подбор разрешён только по rolling validation. CLI возвращает 0
+`v5` использовалась только для development-only sweep, `v6` проверила полный
+календарь, а `v7` увеличила вложенную сетку до 192 точек. Эти попытки честно
+остановлены на неизменённом per-partition support gate и bundle не создали;
+final test остался запечатан. Следующая материальная версия — `v8`. Подбор
+разрешён только по development/rolling validation. CLI возвращает 0
 только после публикации и сохранения отчёта, иначе 1. Причины отказа фиксированы:
 `configuration_invalid`, `source_unavailable`, `dataset_unavailable`,
 `training_unavailable`, `validation_rejected` (rolling validation),
 `test_rejected` (frozen test), `inference_unavailable`, `release_unavailable`.
 Текст исключения и traceback не публикуются. Данные, модель, экспорт и локальные
 отчёты остаются в игнорируемых каталогах; численные результаты не коммитятся.
+
+Полный календарный loader читает годовые партиции одним ограниченным проходом.
+Точки более плотной сетки сохраняют все anchors предыдущей сетки. Отобранные
+контексты записываются в локальный SQLite как сжатые блоки фиксированных
+неисполняемых записей: без исходных идентификаторов событий, provenance и
+локальных путей. Назначение непересекающихся контекстов и упаковка записей
+векторизованы; публичный snapshot-loader не использует увеличенный ML chunk.
+Временный spool удаляется и при успехе, и при контролируемом отказе.
+
+Производный point-in-time dataset кешируется локально в CSV + JSON. Метаданные
+связывают кеш с material release version, точным хэшем data-конфигурации и
+fingerprint manifest источника; несовпадение любого значения вызывает закрытый
+cache miss. Кеш не является моделью и не разрешает publication без повторного
+прохождения rolling gates.
 
 ## Отчёт оценки независимо от публикации
 
