@@ -36,11 +36,10 @@ export function isSameOriginMutation(request: Request): boolean {
   if (origin === null) return false;
   try {
     const parsedOrigin = new URL(origin);
-    const externalHost = request.headers.get('host');
+    const externalHost = request.headers.get('host') ?? new URL(request.url).host;
     const isLoopback = ['127.0.0.1', '::1', 'localhost'].includes(parsedOrigin.hostname);
     return isLoopback
       && ['http:', 'https:'].includes(parsedOrigin.protocol)
-      && externalHost !== null
       && !externalHost.includes(',')
       && parsedOrigin.host.toLowerCase() === externalHost.toLowerCase();
   } catch {
