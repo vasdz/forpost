@@ -2,6 +2,7 @@
 import { execFile, fork } from 'node:child_process';
 import { once } from 'node:events';
 import net from 'node:net';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { expect, it } from 'vitest';
@@ -38,6 +39,11 @@ it.skipIf(process.platform !== 'win32')('закрывает реальный Nex
   expect(await isListening(3000), 'Тест не должен затрагивать чужой Next').toBe(false);
   expect(await isListening(8000), 'Тест не должен затрагивать чужой API').toBe(false);
   const launcher = fork(new URL('./fixtures/local-stack-lifecycle.mjs', import.meta.url), [], {
+    env: {
+      ...process.env,
+      // Тест поднимает настоящий API, поэтому не зависит от активированного shell-окружения.
+      PATH: `${path.resolve('.venv/Scripts')}${path.delimiter}${process.env.PATH ?? ''}`,
+    },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true,
   });
   const owned = new Set([launcher.pid]);

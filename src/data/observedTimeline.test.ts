@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { LocalSituationEvent } from './localSituationContract';
-import { selectObservedEventsAtTimeline } from './observedTimeline';
+import { getObservedTimelineWindow, selectObservedEventsAtTimeline } from './observedTimeline';
 
 const events: LocalSituationEvent[] = [
   { canonicalId: '1'.repeat(64), eventId: 'old', channelId: 'c-1', recordedAt: '2026-08-01T08:00:00', isAlarm: false, sensorValue: '0', qualityCode: 'valid', analysisEligible: true, provenance: 'observed' },
@@ -23,5 +23,12 @@ describe('выбор наблюдений по общей временной ш�
 
   it('не синтезирует события при пустом наборе', () => {
     expect(selectObservedEventsAtTimeline([], 'month', null)).toEqual([]);
+  });
+
+  it('возвращает явные границы того же окна, которым фильтрует события', () => {
+    expect(getObservedTimelineWindow(events, 'day', '2026-08-02T06:00:00')).toEqual({
+      startAt: '2026-08-01T12:00:00',
+      endAt: '2026-08-02T06:00:00',
+    });
   });
 });

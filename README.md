@@ -8,12 +8,15 @@
 
 ## Статус
 
-Сейчас готов защищённый локальный контур: интерфейс Next.js, адаптер
+Сейчас готов защитно ограниченный локальный стенд: интерфейс Next.js, адаптер
 обезличенных данных, fail-closed FastAPI, Bearer/RBAC, аудит целостности,
 тесты и CI-гейты. Локальный pipeline может обучить только
 `sensor_failure` по слабой метке `silence_horizon_proxy`; релиз появляется лишь
 после temporal holdout, отдельной калибровки и строгих gates
-`precision > 0.70` и `recall > 0.50`. Пожарный риск, доступ и износ остаются
+`precision > 0.70` и `recall > 0.50`. Последняя полнокалендарная попытка `v8`
+дошла до rolling validation, но кандидаты не прошли неизменённые quality gates:
+champion, порог, model bundle и prediction export не опубликованы, final test
+остался запечатан. Пожарный риск, доступ и износ остаются
 недоступными до появления подтверждённых источников и не заменяются
 демонстрационными значениями.
 
@@ -35,7 +38,7 @@
 
 Локальный ML-контур (data не покидает машину владельца)
     -> causal features -> temporal split/purge -> holdout calibration
-    -> ml/models/sensor_failure/vN: Skops + model card + SHA-256 manifests
+    -> только после gates: ml/models/sensor_failure/vN + model card + manifests
     -> GET /api/predictions: read-only проверка и импорт proxy-экспорта
     -> UI: evidence tier, probability, horizon, глобальные факторы, решение
 
@@ -72,7 +75,7 @@ train_sensor_failure.py -> data/processed/ml-evaluation.json
    отменит публикацию, если temporal holdout не прошёл gates:
 
    ```powershell
-   & .\.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v1
+   & .\.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v9
    ```
 
 4. Установите frontend-зависимости и запустите локальный стек:
@@ -179,6 +182,8 @@ availability. JSON содержит `users`, `requests`, `errors`, `p95_ms` и �
 - [ML_CAPABILITIES.md](docs/ML_CAPABILITIES.md) — доступность четырёх задач и
   evidence tiers.
 - [ML_METHODS.md](docs/ML_METHODS.md) — temporal-методика, gates и артефакты.
+- [COMPONENT_INVENTORY.md](docs/COMPONENT_INVENTORY.md) — реализованные
+  компоненты, прямые библиотеки, lock-файлы и лицензионные ограничения.
 - [TZ_COMPLIANCE.md](docs/TZ_COMPLIANCE.md) — честная построчная сверка с ТЗ.
 - [SECURITY.md](docs/SECURITY.md) — политика безопасной эксплуатации.
 - [THREAT_MODEL.md](docs/THREAT_MODEL.md) — цепочка атак, MITRE ATT&CK и риски.
@@ -190,8 +195,10 @@ availability. JSON содержит `users`, `requests`, `errors`, `p95_ms` и �
 ## Локальный ML-релиз
 
 На машине владельца данных команда `scripts/train_sensor_failure.py` читает
-локальные журналы, выбирает модель без доступа к финальному test и атомарно
-публикует `ml/models/sensor_failure/vN`. `GET /api/predictions` read-only
+локальные журналы, выбирает модель без доступа к финальному test и только при
+прохождении всех gates атомарно публикует `ml/models/sensor_failure/vN`.
+Текущая попытка `v8` отклонена на rolling validation, поэтому рабочей модели и
+численных test-метрик сейчас нет. `GET /api/predictions` read-only
 проверяет схему, evidence tier, model card и SHA-256; при отсутствии
 доверенного экспорта возвращает `503 pending`. Подробный безопасный порядок —
 в [LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md).
