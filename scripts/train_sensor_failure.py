@@ -111,10 +111,10 @@ def main() -> int:
         stage = "source"
         source_fingerprint = training_source_fingerprint(arguments.raw_root)
         stage = "dataset"
-        cache_paths = _dataset_cache_paths(arguments.evaluation_report, arguments.version)
+        cache_paths = _dataset_cache_paths(arguments.evaluation_report, ml_config.dataset_sha256)
         dataset = _load_cached_dataset(
             *cache_paths,
-            config_sha256=ml_config.sha256,
+            dataset_config_sha256=ml_config.dataset_sha256,
             source_fingerprint=source_fingerprint,
         )
         events = None
@@ -145,7 +145,7 @@ def main() -> int:
             _write_cached_dataset(
                 dataset,
                 *cache_paths,
-                config_sha256=ml_config.sha256,
+                dataset_config_sha256=ml_config.dataset_sha256,
                 source_fingerprint=source_fingerprint,
             )
         stage = "rolling_validation"
@@ -424,8 +424,13 @@ def _latest_spooled_context(window, ml_config) -> pd.DataFrame:
     raise ValueError("Нет событий для current inference")
 
 
-def _dataset_cache_paths(report_path: Path, version: str) -> tuple[Path, Path]:
-    stem = f"ml-training-dataset-{version}"
+def _dataset_cache_paths(report_path: Path, dataset_config_sha256: str) -> tuple[Path, Path]:
+    """Адресует производный набор по параметрам, влияющим на его содержимое."""
+    if len(dataset_config_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in dataset_config_sha256
+    ):
+        raise ValueError("Некорректный fingerprint конфигурации набора")
+    stem = f"ml-training-dataset-{dataset_config_sha256}"
     return report_path.with_name(f"{stem}.csv"), report_path.with_name(f"{stem}.json")
 
 
@@ -433,7 +438,7 @@ def _load_cached_dataset(
     csv_path: Path,
     metadata_path: Path,
     *,
-    config_sha256: str,
+    dataset_config_sha256: str,
     source_fingerprint: str,
 ) -> pd.DataFrame | None:
     if not csv_path.is_file() or not metadata_path.is_file():
@@ -441,8 +446,8 @@ def _load_cached_dataset(
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata != {
-            "format_version": 1,
-            "config_sha256": config_sha256,
+            "format_version": 2,
+            "dataset_config_sha256": dataset_config_sha256,
             "source_fingerprint": source_fingerprint,
             "columns": metadata.get("columns"),
         } or not isinstance(metadata["columns"], list):
@@ -463,13 +468,13 @@ def _write_cached_dataset(
     csv_path: Path,
     metadata_path: Path,
     *,
-    config_sha256: str,
+    dataset_config_sha256: str,
     source_fingerprint: str,
 ) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     metadata = {
-        "format_version": 1,
-        "config_sha256": config_sha256,
+        "format_version": 2,
+        "dataset_config_sha256": dataset_config_sha256,
         "source_fingerprint": source_fingerprint,
         "columns": list(dataset.columns),
     }

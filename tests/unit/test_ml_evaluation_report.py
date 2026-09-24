@@ -395,6 +395,7 @@ def command(tmp_path, monkeypatch):
         feature_schema_version="6",
         label_strategy="cadence_adjusted_silence_horizon_proxy_v2",
         sha256="a" * 64,
+        dataset_sha256="d" * 64,
         training=TrainingConfig(
             purge_hours=48,
             minimum_precision=0.5,
@@ -496,7 +497,7 @@ def test_command_rejects_validation_without_release_or_test_evidence(command, re
     assert "training_validation_selection" in capsys.readouterr().err
 
 
-def test_derived_dataset_cache_requires_both_config_and_source_fingerprints(command, tmp_path):
+def test_derived_dataset_cache_requires_both_dataset_and_source_fingerprints(command, tmp_path):
     module, _arguments, _config = command
     dataset = training_frame().assign(evidence_tier="proxy")
     csv_path = tmp_path / "derived.csv"
@@ -506,14 +507,14 @@ def test_derived_dataset_cache_requires_both_config_and_source_fingerprints(comm
         dataset,
         csv_path,
         metadata_path,
-        config_sha256="a" * 64,
+        dataset_config_sha256="a" * 64,
         source_fingerprint="b" * 64,
     )
 
     cached = module._load_cached_dataset(
         csv_path,
         metadata_path,
-        config_sha256="a" * 64,
+        dataset_config_sha256="a" * 64,
         source_fingerprint="b" * 64,
     )
     assert cached is not None
@@ -522,22 +523,24 @@ def test_derived_dataset_cache_requires_both_config_and_source_fingerprints(comm
         module._load_cached_dataset(
             csv_path,
             metadata_path,
-            config_sha256="c" * 64,
+            dataset_config_sha256="c" * 64,
             source_fingerprint="b" * 64,
         )
         is None
     )
 
 
-def test_derived_dataset_cache_paths_are_isolated_by_release_version(command, tmp_path):
+def test_derived_dataset_cache_paths_are_content_addressed(command, tmp_path):
     module, _arguments, _config = command
     report_path = tmp_path / "ml-evaluation.json"
 
-    v6_paths = module._dataset_cache_paths(report_path, "v6")
-    v7_paths = module._dataset_cache_paths(report_path, "v7")
+    first_paths = module._dataset_cache_paths(report_path, "a" * 64)
+    same_paths = module._dataset_cache_paths(report_path, "a" * 64)
+    changed_paths = module._dataset_cache_paths(report_path, "b" * 64)
 
-    assert set(v6_paths).isdisjoint(v7_paths)
-    assert all(path.parent == report_path.parent for path in (*v6_paths, *v7_paths))
+    assert first_paths == same_paths
+    assert set(first_paths).isdisjoint(changed_paths)
+    assert all(path.parent == report_path.parent for path in (*first_paths, *changed_paths))
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,7 @@ class MlConfig:
     feature_windows_hours: tuple[int, ...]
     training: TrainingConfig
     sha256: str
+    dataset_sha256: str
 
 
 def load_ml_config(path: Path) -> MlConfig:
@@ -107,6 +109,25 @@ def load_ml_config(path: Path) -> MlConfig:
     windows = tuple(int(value) for value in payload["feature_windows_hours"])
     if not windows or any(value < 1 for value in windows):
         raise ValueError("Окна признаков должны быть положительными")
+    dataset_payload = {
+        key: payload[key]
+        for key in (
+            "feature_schema_version",
+            "label_strategy",
+            "horizon_hours",
+            "cutoff_count",
+            "max_training_events",
+            "feature_windows_hours",
+        )
+    }
+    dataset_sha256 = hashlib.sha256(
+        json.dumps(
+            dataset_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     return MlConfig(
         seed=training.seed,
         feature_schema_version=str(payload["feature_schema_version"]),
@@ -117,4 +138,5 @@ def load_ml_config(path: Path) -> MlConfig:
         feature_windows_hours=windows,
         training=training,
         sha256=hashlib.sha256(raw).hexdigest(),
+        dataset_sha256=dataset_sha256,
     )

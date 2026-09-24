@@ -159,14 +159,19 @@ Skops и связь метрик экспорта с test-метриками. П
 Из корня репозитория, после установки локальных Python-зависимостей:
 
 ```powershell
-.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v7
+.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v8
 ```
 
 `v5` использовалась только для development-only sweep, `v6` проверила полный
-календарь, а `v7` увеличила вложенную сетку до 192 точек. Эти попытки честно
-остановлены на неизменённом per-partition support gate и bundle не создали;
-final test остался запечатан. Следующая материальная версия — `v8`. Подбор
-разрешён только по development/rolling validation. CLI возвращает 0
+календарь, а `v7` увеличила вложенную сетку до 192 точек и честно остановилась
+на неизменённом per-partition support gate. Для `v8` размер validation-блока
+был заранее выбран как минимальный допустимый во всём математически возможном
+диапазоне: использовались только количества классов в development-частях, без
+метрик моделей и без чтения final-test labels. Все fit/calibration/validation
+части прошли support gate, но ни один кандидат с единым порогом не прошёл
+неизменённые performance gates во всех трёх rolling folds. Bundle не создан,
+а final test остался запечатан. Подбор разрешён только по
+development/rolling validation. CLI возвращает 0
 только после публикации и сохранения отчёта, иначе 1. Причины отказа фиксированы:
 `configuration_invalid`, `source_unavailable`, `dataset_unavailable`,
 `training_unavailable`, `validation_rejected` (rolling validation),
@@ -182,11 +187,13 @@ final test остался запечатан. Следующая материа�
 векторизованы; публичный snapshot-loader не использует увеличенный ML chunk.
 Временный spool удаляется и при успехе, и при контролируемом отказе.
 
-Производный point-in-time dataset кешируется локально в CSV + JSON. Метаданные
-связывают кеш с material release version, точным хэшем data-конфигурации и
-fingerprint manifest источника; несовпадение любого значения вызывает закрытый
-cache miss. Кеш не является моделью и не разрешает publication без повторного
-прохождения rolling gates.
+Производный point-in-time dataset кешируется локально в CSV + JSON. Имя и
+метаданные адресуют кеш по каноническому хэшу только тех параметров, которые
+влияют на построение строк, и по fingerprint manifest источника. Поэтому
+изменение training-only геометрии folds не требует повторного чтения сырых
+данных, а изменение окон, горизонта, календаря, лимита, схемы признаков,
+стратегии метки или источника закрыто приводит к cache miss. Кеш не является
+моделью и не разрешает publication без повторного прохождения rolling gates.
 
 ## Отчёт оценки независимо от публикации
 

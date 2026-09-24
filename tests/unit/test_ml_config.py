@@ -15,10 +15,34 @@ def test_repository_ml_config_is_single_source_for_training_policy():
     assert config.feature_windows_hours == (1, 6, 24, 72, 168)
     assert config.horizon_hours == 24
     assert config.cutoff_count == 192
+    assert config.training.validation_points_per_fold == 17
     assert config.training.purge_hours >= config.horizon_hours
     assert config.training.minimum_precision == 0.7
     assert config.training.minimum_recall == 0.5
     assert len(config.sha256) == 64
+    assert len(config.dataset_sha256) == 64
+
+
+def test_dataset_fingerprint_ignores_training_only_policy(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    payload = yaml.safe_load((root / "ml" / "config.yaml").read_text(encoding="utf-8"))
+
+    base_path = tmp_path / "base.yaml"
+    base_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    training_path = tmp_path / "training.yaml"
+    training_payload = payload | {"validation_points_per_fold": 16}
+    training_path.write_text(yaml.safe_dump(training_payload), encoding="utf-8")
+    dataset_path = tmp_path / "dataset.yaml"
+    dataset_payload = payload | {"cutoff_count": 64}
+    dataset_path.write_text(yaml.safe_dump(dataset_payload), encoding="utf-8")
+
+    base = load_ml_config(base_path)
+    training_only = load_ml_config(training_path)
+    dataset_change = load_ml_config(dataset_path)
+
+    assert base.sha256 != training_only.sha256
+    assert base.dataset_sha256 == training_only.dataset_sha256
+    assert base.dataset_sha256 != dataset_change.dataset_sha256
 
 
 @pytest.mark.parametrize("content", [b"private_source: [secret.xlsx", b"\xff"])
