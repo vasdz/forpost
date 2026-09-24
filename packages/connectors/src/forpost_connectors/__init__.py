@@ -5,7 +5,10 @@ from forpost_connectors.local_snapshot import (
     SourceSnapshotError,
     TrainingWindow,
     build_local_snapshot,
+    cleanup_training_window,
+    load_training_context,
     load_training_window,
+    training_source_fingerprint,
 )
 
 __all__ = [
@@ -19,5 +22,8 @@ __all__ = [
     "TrainingWindow",
     "analyze_dataset",
     "build_local_snapshot",
+    "cleanup_training_window",
+    "load_training_context",
     "load_training_window",
+    "training_source_fingerprint",
 ]

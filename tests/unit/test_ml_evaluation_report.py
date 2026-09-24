@@ -410,6 +410,7 @@ def command(tmp_path, monkeypatch):
     frame = training_frame()
     monkeypatch.setattr(module, "parse_arguments", lambda: arguments)
     monkeypatch.setattr(module, "load_ml_config", lambda _path: config)
+    monkeypatch.setattr(module, "training_source_fingerprint", lambda _path: "f" * 64)
     monkeypatch.setattr(
         module,
         "load_training_window",
@@ -450,7 +451,34 @@ def test_command_writes_published_report_only_after_real_release(command, report
     assert set(report.validation_confidence_intervals) == set(card["validation_metrics"])
 
 
-def test_command_rejects_validation_without_release_or_test_evidence(command, reports):
+def test_command_preserves_calendar_cutoffs_selected_by_source(command, monkeypatch):
+    """Ловит потерю full-calendar точек между потоковым loader и dataset."""
+    module, _arguments, _config = command
+    cutoffs = ("2026-01-02T00:00:00", "2026-02-02T00:00:00")
+    monkeypatch.setattr(
+        module,
+        "load_training_window",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            events=[None] * 320,
+            channels=[],
+            skipped_event_count=0,
+            truncated_before=False,
+            prediction_cutoffs=cutoffs,
+        ),
+    )
+    received = {}
+
+    def capture_cutoffs(*_args, **kwargs):
+        received["prediction_cutoffs"] = kwargs.get("prediction_cutoffs")
+        return training_frame().assign(evidence_tier="proxy")
+
+    monkeypatch.setattr(module, "build_sensor_failure_dataset", capture_cutoffs)
+
+    assert module.main() == 0
+    assert received["prediction_cutoffs"] == cutoffs
+
+
+def test_command_rejects_validation_without_release_or_test_evidence(command, reports, capsys):
     from dataclasses import replace
 
     module, arguments, config = command
@@ -465,6 +493,40 @@ def test_command_rejects_validation_without_release_or_test_evidence(command, re
     assert report.split_sizes.validation == 48
     assert report.test_metrics is None
     assert not arguments.registry_root.exists()
+    assert "training_validation_selection" in capsys.readouterr().err
+
+
+def test_derived_dataset_cache_requires_both_config_and_source_fingerprints(command, tmp_path):
+    module, _arguments, _config = command
+    dataset = training_frame().assign(evidence_tier="proxy")
+    csv_path = tmp_path / "derived.csv"
+    metadata_path = tmp_path / "derived.json"
+
+    module._write_cached_dataset(
+        dataset,
+        csv_path,
+        metadata_path,
+        config_sha256="a" * 64,
+        source_fingerprint="b" * 64,
+    )
+
+    cached = module._load_cached_dataset(
+        csv_path,
+        metadata_path,
+        config_sha256="a" * 64,
+        source_fingerprint="b" * 64,
+    )
+    assert cached is not None
+    assert len(cached) == len(dataset)
+    assert (
+        module._load_cached_dataset(
+            csv_path,
+            metadata_path,
+            config_sha256="c" * 64,
+            source_fingerprint="b" * 64,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -605,7 +667,9 @@ def test_command_replaces_stale_report_on_source_failure_without_leaking_error(
     )
 
     def source_failure(*_args, **_kwargs):
-        raise module.SourceSnapshotError("C:/private-source/secret.xlsx")
+        raise module.SourceSnapshotError(
+            "C:/private-source/secret.xlsx", diagnostic_code="calendar_event_limit"
+        )
 
     monkeypatch.setattr(module, "load_training_window", source_failure)
     assert module.main() == 1
@@ -615,7 +679,9 @@ def test_command_replaces_stale_report_on_source_failure_without_leaking_error(
     assert report.horizon_hours == 48
     assert report.validation_metrics is None
     assert report.test_metrics is None
-    assert "private-source" not in capsys.readouterr().err
+    stderr = capsys.readouterr().err
+    assert "private-source" not in stderr
+    assert "calendar_event_limit" in stderr
     assert "secret.xlsx" not in arguments.evaluation_report.read_text(encoding="utf-8")
 
 

@@ -1,14 +1,18 @@
 import csv
 import importlib.util
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from forpost_connectors.local_snapshot import (
     SourceSnapshotError,
     build_local_snapshot,
+    cleanup_training_window,
+    load_training_context,
     load_training_window,
 )
 
@@ -196,6 +200,344 @@ def test_training_window_stops_before_older_partition_after_tail_is_complete(mon
 
     assert [event.event_id for event in window.events] == ["4", "3", "2"]
     assert window.truncated_before is True
+
+
+def test_training_window_samples_exact_uniform_calendar_contexts(monkeypatch, tmp_path):
+    """Ловит возврат к последнему хвосту вместо полных окон по календарю."""
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    events = [
+        {
+            "ид_события": event_id,
+            "ид_канала_данных": "20",
+            "дата": date,
+            "время": "10:00:00",
+            "тревожное": "0",
+            "значение_датчика": "1",
+        }
+        for event_id, date in (
+            ("start", "2026-01-02"),
+            ("outside", "2026-03-01"),
+            ("middle", "2026-07-03"),
+            ("end", "2026-12-31"),
+        )
+    ]
+    write_valid_sources(raw_root, events)
+
+    window = load_training_window(
+        raw_root,
+        max_events=100,
+        cutoff_count=3,
+        context_before_hours=24,
+        context_after_hours=24,
+    )
+
+    assert window.prediction_cutoffs == (
+        "2026-01-02T00:00:00",
+        "2026-07-02T12:00:00",
+        "2026-12-31T00:00:00",
+    )
+    try:
+        selected = {
+            event.recorded_at
+            for cutoff in window.prediction_cutoffs
+            for event in load_training_context(
+                window, cutoff, context_before_hours=24, context_after_hours=24
+            )
+        }
+        assert "2026-07-03T10:00:00" in selected
+        assert "2026-03-01T10:00:00" not in selected
+        assert window.truncated_before is False
+    finally:
+        cleanup_training_window(window)
+
+
+def test_training_calendar_density_increase_preserves_existing_anchors(tmp_path):
+    """Ловит замену зрелых окон при увеличении label-free плотности календаря."""
+    import forpost_connectors.local_snapshot as local_snapshot
+
+    journals = tuple(tmp_path / f"events-{year}.csv" for year in range(2015, 2027))
+
+    baseline = local_snapshot._calendar_cutoffs_from_partitions(
+        journals,
+        cutoff_count=18,
+        context_before_hours=168,
+        context_after_hours=24,
+    )
+    expanded = local_snapshot._calendar_cutoffs_from_partitions(
+        journals,
+        cutoff_count=64,
+        context_before_hours=168,
+        context_after_hours=24,
+    )
+
+    assert len(expanded) == 64
+    assert set(baseline).issubset(expanded)
+    assert expanded == tuple(sorted(expanded))
+
+
+def test_training_calendar_rejects_inexact_window_truncation(monkeypatch, tmp_path):
+    """Ловит молчаливое усечение событий внутри выбранных календарных окон."""
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    events = [
+        {
+            "ид_события": str(index),
+            "ид_канала_данных": "20",
+            "дата": "2026-01-01",
+            "время": f"{index:02d}:00:00",
+            "тревожное": "0",
+            "значение_датчика": str(index),
+        }
+        for index in range(8)
+    ]
+    write_valid_sources(raw_root, events)
+
+    with pytest.raises(SourceSnapshotError, match="контекста"):
+        load_training_window(
+            raw_root,
+            max_events=2,
+            cutoff_count=2,
+            context_before_hours=1,
+            context_after_hours=1,
+        )
+
+
+def test_training_calendar_quarantines_event_from_wrong_year_partition(monkeypatch, tmp_path):
+    """Ловит остановку полной истории из-за единичной строки не своей партиции."""
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(
+        raw_root,
+        [
+            {
+                "ид_события": "valid-1",
+                "ид_канала_данных": "20",
+                "дата": "2026-01-01",
+                "время": "00:00:00",
+                "тревожное": "0",
+                "значение_датчика": "1",
+            },
+            {
+                "ид_события": "wrong-partition",
+                "ид_канала_данных": "20",
+                "дата": "2027-01-01",
+                "время": "00:00:00",
+                "тревожное": "0",
+                "значение_датчика": "1",
+            },
+            {
+                "ид_события": "valid-2",
+                "ид_канала_данных": "20",
+                "дата": "2026-12-31",
+                "время": "23:00:00",
+                "тревожное": "0",
+                "значение_датчика": "1",
+            },
+        ],
+    )
+
+    window = load_training_window(
+        raw_root,
+        max_events=100,
+        cutoff_count=2,
+        context_before_hours=1,
+        context_after_hours=1,
+    )
+
+    try:
+        selected = {
+            event.recorded_at
+            for cutoff in window.prediction_cutoffs
+            for event in load_training_context(
+                window, cutoff, context_before_hours=1, context_after_hours=1
+            )
+        }
+        assert selected == {"2026-01-01T00:00:00", "2026-12-31T23:00:00"}
+        assert window.skipped_event_count == 1
+    finally:
+        cleanup_training_window(window)
+
+
+def test_training_calendar_has_separate_bounded_full_archive_row_limit(monkeypatch, tmp_path):
+    """Ловит применение меньшего UI-лимита к полному локальному ML-архиву."""
+    import forpost_connectors.local_snapshot as local_snapshot
+
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(
+        raw_root,
+        [
+            {
+                "ид_события": str(index),
+                "ид_канала_данных": "20",
+                "дата": "2026-01-01",
+                "время": f"0{index}:00:00",
+                "тревожное": "0",
+                "значение_датчика": "1",
+            }
+            for index in range(3)
+        ],
+    )
+    monkeypatch.setattr(local_snapshot, "MAX_CSV_TOTAL_ROWS", 2)
+    monkeypatch.setattr(local_snapshot, "MAX_TRAINING_SOURCE_ROWS", 3, raising=False)
+
+    window = load_training_window(
+        raw_root,
+        max_events=10,
+        cutoff_count=2,
+        context_before_hours=1,
+        context_after_hours=1,
+    )
+
+    assert window.scanned_event_count == 3
+    cleanup_training_window(window)
+
+
+def test_training_calendar_spools_total_above_per_context_limit(monkeypatch, tmp_path):
+    """Ловит возврат общего RAM-лимита вместо bounded per-cutoff контекстов."""
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(
+        raw_root,
+        [
+            {
+                "ид_события": event_id,
+                "ид_канала_данных": "20",
+                "дата": date,
+                "время": time,
+                "тревожное": "0",
+                "значение_датчика": "1",
+            }
+            for event_id, date, time in (
+                ("start", "2026-01-01", "01:00:00"),
+                ("middle", "2026-07-02", "12:00:00"),
+                ("end", "2026-12-31", "23:00:00"),
+            )
+        ],
+    )
+
+    window = load_training_window(
+        raw_root,
+        max_events=1,
+        cutoff_count=3,
+        context_before_hours=1,
+        context_after_hours=1,
+    )
+
+    assert window.selected_event_count == 3
+    assert all(
+        len(load_training_context(window, cutoff, context_before_hours=1, context_after_hours=1))
+        == 1
+        for cutoff in window.prediction_cutoffs
+    )
+    spool_path = window.spool_path
+    cleanup_training_window(window)
+    assert spool_path is not None and not spool_path.exists()
+
+
+def test_training_calendar_spool_uses_compact_ml_only_schema(monkeypatch, tmp_path):
+    """Ловит возврат raw identifiers и повторяющихся строк в disk spool."""
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(
+        raw_root,
+        [
+            {
+                "ид_события": "raw-id-must-not-be-spooled",
+                "ид_канала_данных": "20",
+                "дата": "2026-01-01",
+                "время": "01:00:00",
+                "тревожное": "0",
+                "значение_датчика": "1.5",
+            }
+        ],
+    )
+
+    window = load_training_window(
+        raw_root,
+        max_events=10,
+        cutoff_count=2,
+        context_before_hours=1,
+        context_after_hours=1,
+    )
+
+    try:
+        assert window.spool_path is not None
+        connection = sqlite3.connect(window.spool_path)
+        try:
+            columns = tuple(row[1] for row in connection.execute("PRAGMA table_info(events)"))
+            stored = connection.execute(
+                "SELECT channel_index, recorded_second, is_alarm, sensor_value, quality_issue "
+                "FROM events"
+            ).fetchone()
+        finally:
+            connection.close()
+        assert columns == (
+            "sequence",
+            "channel_index",
+            "recorded_second",
+            "is_alarm",
+            "sensor_value",
+            "quality_issue",
+        )
+        assert stored is not None and stored[0] == 0
+        context = load_training_context(
+            window,
+            window.prediction_cutoffs[0],
+            context_before_hours=1,
+            context_after_hours=1,
+        )
+        assert context[0].channel_id == "20"
+        assert context[0].sensor_value == "1.5"
+    finally:
+        cleanup_training_window(window)
+
+
+def test_training_calendar_uses_sorted_interval_lookup_not_repeated_masks(monkeypatch, tmp_path):
+    """Ловит возврат O(selected events * cutoff count) boolean-масок."""
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(
+        raw_root,
+        [
+            {
+                "ид_события": "selected",
+                "ид_канала_данных": "20",
+                "дата": "2026-01-01",
+                "время": "01:00:00",
+                "тревожное": "0",
+                "значение_датчика": "1",
+            }
+        ],
+    )
+
+    def forbidden_between(*_args, **_kwargs):
+        raise AssertionError("Календарный loader должен использовать sorted interval lookup")
+
+    monkeypatch.setattr(pd.Series, "between", forbidden_between)
+    window = load_training_window(
+        raw_root,
+        max_events=10,
+        cutoff_count=3,
+        context_before_hours=1,
+        context_after_hours=1,
+    )
+
+    cleanup_training_window(window)
+
+
+def test_training_calendar_rejects_extra_csv_fields_in_single_pass(monkeypatch, tmp_path):
+    """Ловит принятие malformed-строки после удаления отдельного pre-scan."""
+    raw_root, _ = configure_local_roots(monkeypatch, tmp_path)
+    write_valid_sources(raw_root)
+    journal_path = raw_root / "ext-journal-2026.csv"
+    with journal_path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(EVENT_HEADERS)
+        writer.writerow(["bad", "20", "2026-01-02", "00:00:00", "0", "1", "extra"])
+
+    with pytest.raises(SourceSnapshotError, match="число полей"):
+        load_training_window(
+            raw_root,
+            max_events=10,
+            cutoff_count=2,
+            context_before_hours=1,
+            context_after_hours=1,
+        )
 
 
 def load_snapshot_script():

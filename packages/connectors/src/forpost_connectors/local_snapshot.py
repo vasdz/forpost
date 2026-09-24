@@ -7,12 +7,15 @@ import hashlib
 import heapq
 import json
 import re
+import sqlite3
+import warnings
+from bisect import bisect_right
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, gettempdir
 from threading import Lock
 from typing import Final
 
@@ -31,8 +34,12 @@ MAX_CSV_FILE_BYTES: Final[int] = 4 * 1024 * 1024 * 1024
 MAX_CSV_TOTAL_BYTES: Final[int] = 32 * 1024 * 1024 * 1024
 MAX_CSV_ROWS: Final[int] = 8_000_000
 MAX_CSV_TOTAL_ROWS: Final[int] = 8_500_000
+# Полный локальный архив ML больше публичного snapshot-контура, но также жёстко ограничен.
+MAX_TRAINING_SOURCE_ROWS: Final[int] = MAX_CSV_ROWS * MAX_CSV_FILES
 MAX_CSV_FIELD_CHARS: Final[int] = 1_024
 EVENT_CHUNK_ROWS: Final[int] = 10_000
+# Первая прошедшая проверку календарная сетка остаётся частью всех более плотных сеток.
+STABLE_CALENDAR_BASE_CUTOFFS: Final[int] = 18
 # Должен совпадать с максимумом, который принимает Next.js-маршрут снимка.
 MAX_PUBLIC_SNAPSHOT_BYTES: Final[int] = 8 * 1024 * 1024
 YEAR_IN_FILENAME: Final[re.Pattern[str]] = re.compile(r"(?:^|[-_])(\d{4})(?:[-_.]|$)")
@@ -71,6 +78,10 @@ OBJECT_HEADERS: Final[frozenset[str]] = frozenset(
 
 class SourceSnapshotError(ValueError):
     """Локальная CSV-выгрузка либо путь снимка не удовлетворяет контракту."""
+
+    def __init__(self, message: str, *, diagnostic_code: str = "source_invalid") -> None:
+        super().__init__(message)
+        self.diagnostic_code = diagnostic_code
 
 
 @dataclass(frozen=True)
@@ -163,16 +174,43 @@ class TrainingWindow:
     scanned_event_count: int
     skipped_event_count: int
     truncated_before: bool
+    selected_event_count: int
+    spool_path: Path | None
+    prediction_cutoffs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TrainingContextEvent:
+    """Минимальное событие ML-контекста без исходных идентификаторов строк."""
+
+    channel_id: str
+    recorded_at: str
+    is_alarm: bool | None
+    sensor_value: str
+    quality_code: str
+    analysis_eligible: bool = True
 
 
 def load_training_window(
-    raw_root: Path, *, max_events: int = MAX_TRAINING_EVENTS
+    raw_root: Path,
+    *,
+    max_events: int = MAX_TRAINING_EVENTS,
+    cutoff_count: int | None = None,
+    context_before_hours: int | None = None,
+    context_after_hours: int | None = None,
 ) -> TrainingWindow:
-    """Читает непрерывный правый хвост всей истории с явным левым усечением."""
+    """Читает хвост либо точные bounded-memory окна по всей календарной истории."""
     if not 0 < max_events <= MAX_TRAINING_EVENTS:
         raise SourceSnapshotError(
             f"Лимит событий обучения должен быть от 1 до {MAX_TRAINING_EVENTS}"
         )
+    calendar_options = (cutoff_count, context_before_hours, context_after_hours)
+    if any(value is not None for value in calendar_options) and not all(
+        type(value) is int and value > 0 for value in calendar_options
+    ):
+        raise SourceSnapshotError("Параметры календарных окон должны быть положительными целыми")
+    if cutoff_count is not None and cutoff_count < 2:
+        raise SourceSnapshotError("Для календарного обучения нужны минимум две точки")
     checked_raw_root = _guard_directory(raw_root, _raw_data_root(), "Каталог источника")
     discovered = _discover_csv_roles(checked_raw_root)
     selected_journals = _select_training_journals(discovered["journals"])
@@ -180,14 +218,380 @@ def load_training_window(
     _validate_selected_csv_inputs((discovered["channels"], discovered["objects"]))
     objects = _read_objects(discovered["objects"])
     channels, _ = _read_channels(discovered["channels"], {item.object_id for item in objects})
-    events, scanned, skipped, truncated = _read_training_events(selected_journals, max_events)
+    prediction_cutoffs: tuple[str, ...] = ()
+    if cutoff_count is None:
+        events, scanned, skipped, truncated = _read_training_events(selected_journals, max_events)
+        selected_event_count = len(events)
+        spool_path = None
+    else:
+        spool_path, selected_event_count, scanned, skipped, prediction_cutoffs = (
+            _read_training_calendar_events(
+                selected_journals,
+                channels=channels,
+                max_events=max_events,
+                cutoff_count=cutoff_count,
+                context_before_hours=context_before_hours,
+                context_after_hours=context_after_hours,
+            )
+        )
+        events = ()
+        truncated = False
     return TrainingWindow(
         channels=channels,
         events=events,
         scanned_event_count=scanned,
         skipped_event_count=skipped,
         truncated_before=truncated,
+        selected_event_count=selected_event_count,
+        spool_path=spool_path,
+        prediction_cutoffs=prediction_cutoffs,
     )
+
+
+def training_source_fingerprint(raw_root: Path) -> str:
+    """Хеширует manifest локальных CSV без чтения или раскрытия исходных строк."""
+    checked_raw_root = _guard_directory(raw_root, _raw_data_root(), "Каталог источника")
+    digest = hashlib.sha256(b"forpost-training-source-v1\0")
+    for path in _discover_bounded_csv_files(checked_raw_root):
+        stat = path.stat()
+        digest.update(path.relative_to(checked_raw_root).as_posix().encode("utf-8"))
+        digest.update(f"\0{stat.st_size}\0{stat.st_mtime_ns}\0".encode())
+    return digest.hexdigest()
+
+
+def load_training_context(
+    window: TrainingWindow,
+    cutoff: str,
+    *,
+    context_before_hours: int,
+    context_after_hours: int,
+) -> tuple[TrainingContextEvent, ...]:
+    """Читает один bounded cutoff-контекст из локального SQLite spool."""
+    if cutoff not in window.prediction_cutoffs or window.spool_path is None:
+        raise SourceSnapshotError("Неизвестный календарный контекст обучения")
+    cutoff_at = datetime.fromisoformat(cutoff)
+    start = _calendar_second(cutoff_at - timedelta(hours=context_before_hours))
+    end = _calendar_second(cutoff_at + timedelta(hours=context_after_hours))
+    channel_ids = tuple(channel.channel_id for channel in window.channels)
+    try:
+        connection = sqlite3.connect(f"file:{window.spool_path.as_posix()}?mode=ro", uri=True)
+        rows = connection.execute(
+            """SELECT sequence, channel_index, recorded_second, is_alarm,
+                      sensor_value, quality_issue
+               FROM events WHERE recorded_second >= ? AND recorded_second <= ?
+               ORDER BY recorded_second DESC, sequence DESC""",
+            (start, end),
+        ).fetchall()
+    except sqlite3.Error as error:
+        raise SourceSnapshotError(
+            "Контекст обучения не удалось прочитать", diagnostic_code="calendar_spool_read"
+        ) from error
+    finally:
+        if "connection" in locals():
+            connection.close()
+    return tuple(
+        TrainingContextEvent(
+            channel_id=channel_ids[row[1]],
+            recorded_at=(datetime(1970, 1, 1) + timedelta(seconds=row[2])).isoformat(
+                timespec="seconds"
+            ),
+            is_alarm=None if row[3] is None else bool(row[3]),
+            sensor_value="" if row[4] is None else format(row[4], ".17g"),
+            quality_code="alarm_with_technical_value" if row[5] else "valid",
+        )
+        for row in rows
+    )
+
+
+def cleanup_training_window(window: TrainingWindow) -> None:
+    """Удаляет только созданный loader-ом временный SQLite spool."""
+    spool_path = getattr(window, "spool_path", None)
+    if spool_path is None:
+        return
+    expected_prefix = "forpost-ml-calendar-"
+    if spool_path.parent.resolve() != Path(
+        gettempdir()
+    ).resolve() or not spool_path.name.startswith(expected_prefix):
+        raise SourceSnapshotError("Отказано в удалении неизвестного training spool")
+    spool_path.unlink(missing_ok=True)
+
+
+def _read_training_calendar_events(
+    journals: tuple[Path, ...],
+    *,
+    channels: tuple[ChannelRegistryEntry, ...],
+    max_events: int,
+    cutoff_count: int,
+    context_before_hours: int,
+    context_after_hours: int,
+) -> tuple[Path, int, int, int, tuple[str, ...]]:
+    """Одним проходом сохраняет только точные контексты uniform cutoffs."""
+    cutoffs = _calendar_cutoffs_from_partitions(
+        journals,
+        cutoff_count=cutoff_count,
+        context_before_hours=context_before_hours,
+        context_after_hours=context_after_hours,
+    )
+    context_intervals = tuple(
+        (
+            cutoff - timedelta(hours=context_before_hours),
+            cutoff + timedelta(hours=context_after_hours),
+        )
+        for cutoff in cutoffs
+    )
+    intervals = _merge_calendar_intervals(
+        cutoffs,
+        before=timedelta(hours=context_before_hours),
+        after=timedelta(hours=context_after_hours),
+    )
+    spool_path, selected, scanned, skipped = _spool_calendar_events(
+        journals,
+        intervals,
+        context_intervals=context_intervals,
+        channel_indexes={channel.channel_id: index for index, channel in enumerate(channels)},
+        max_events=max_events,
+    )
+    return (
+        spool_path,
+        selected,
+        scanned,
+        skipped,
+        tuple(cutoff.isoformat(timespec="seconds") for cutoff in cutoffs),
+    )
+
+
+def _calendar_cutoffs_from_partitions(
+    journals: tuple[Path, ...],
+    *,
+    cutoff_count: int,
+    context_before_hours: int,
+    context_after_hours: int,
+) -> tuple[datetime, ...]:
+    """Фиксирует календарь независимо от плотности событий и будущих меток."""
+    years = tuple(year for path in journals if (year := _partition_year(path)) is not None)
+    if not years:
+        raise SourceSnapshotError("Нет годовых партиций для календарного обучения")
+    first = datetime(min(years), 1, 1) + timedelta(hours=context_before_hours)
+    last = datetime(max(years) + 1, 1, 1) - timedelta(hours=context_after_hours)
+    if first > last:
+        raise SourceSnapshotError("История короче календарного контекста обучения")
+    base_count = min(cutoff_count, STABLE_CALENDAR_BASE_CUTOFFS)
+    anchors = [
+        timestamp.to_pydatetime() for timestamp in pd.date_range(first, last, periods=base_count)
+    ]
+    # Обычный linspace полностью сдвигает внутренние точки при смене плотности.
+    # На разреженной телеметрии это делает validation support нестабильным. Поэтому
+    # расширяем базовую label-free сетку последовательным делением крупнейших gaps.
+    while len(anchors) < cutoff_count:
+        anchors.sort()
+        _, _, gap_index = max(
+            (
+                right - left,
+                -index,
+                index,
+            )
+            for index, (left, right) in enumerate(zip(anchors[:-1], anchors[1:], strict=True))
+        )
+        left, right = anchors[gap_index], anchors[gap_index + 1]
+        midpoint = left + (right - left) / 2
+        if midpoint in anchors:
+            raise SourceSnapshotError(
+                "Календарный диапазон слишком мал для заданной плотности",
+                diagnostic_code="calendar_cutoff_density",
+            )
+        anchors.append(midpoint)
+    return tuple(sorted(anchors))
+
+
+def _spool_calendar_events(
+    journals: tuple[Path, ...],
+    intervals: tuple[tuple[datetime, datetime], ...],
+    *,
+    context_intervals: tuple[tuple[datetime, datetime], ...],
+    channel_indexes: dict[str, int],
+    max_events: int,
+) -> tuple[Path, int, int, int]:
+    scanned = 0
+    skipped = 0
+    sequence = 0
+    context_counts = [0] * len(context_intervals)
+    context_starts, context_ends = _non_overlapping_context_bounds(context_intervals)
+    allowed_dates = _calendar_date_literals(intervals)
+    with NamedTemporaryFile(
+        prefix="forpost-ml-calendar-", suffix=".sqlite3", delete=False
+    ) as temporary:
+        spool_path = Path(temporary.name)
+    try:
+        connection = sqlite3.connect(spool_path)
+        connection.execute("PRAGMA journal_mode=OFF")
+        connection.execute("PRAGMA synchronous=OFF")
+        connection.execute(
+            """CREATE TABLE events (
+                sequence INTEGER PRIMARY KEY,
+                channel_index INTEGER NOT NULL,
+                recorded_second INTEGER NOT NULL,
+                is_alarm INTEGER,
+                sensor_value REAL,
+                quality_issue INTEGER NOT NULL
+            )"""
+        )
+        for path in journals:
+            expected_year = _partition_year(path)
+            if expected_year is not None and not any(
+                start.year <= expected_year <= end.year for start, end in intervals
+            ):
+                continue
+            for chunk in _read_event_chunks(path, validate_rows=False):
+                scanned += len(chunk)
+                if scanned > MAX_TRAINING_SOURCE_ROWS:
+                    raise SourceSnapshotError(
+                        "Превышено допустимое число строк в прочитанных ML-партициях",
+                        diagnostic_code="calendar_source_row_limit",
+                    )
+                selected_chunk = chunk.loc[chunk["дата"].isin(allowed_dates)]
+                if selected_chunk.empty:
+                    continue
+                timestamps, invalid_count = _valid_training_timestamps(
+                    selected_chunk, expected_year, quarantine_partition_mismatch=True
+                )
+                skipped += invalid_count
+                numeric_values = pd.to_numeric(
+                    selected_chunk["значение_датчика"], errors="coerce"
+                ).replace([float("inf"), float("-inf")], pd.NA)
+                batch = []
+                for index, timestamp in timestamps.items():
+                    recorded_at = timestamp.to_pydatetime()
+                    context_index = bisect_right(context_starts, recorded_at) - 1
+                    if context_index < 0 or recorded_at > context_ends[context_index]:
+                        continue
+                    channel_id = _required_value(chunk.at[index, "ид_канала_данных"])
+                    channel_index = channel_indexes.get(channel_id)
+                    if channel_index is None:
+                        continue
+                    is_alarm = _parse_alarm(chunk.at[index, "тревожное"])
+                    sensor_value = _required_value(chunk.at[index, "значение_датчика"])
+                    quality_code, analysis_eligible = _classify_event_quality(
+                        sensor_value, is_alarm, recorded_at
+                    )
+                    if not analysis_eligible:
+                        continue
+                    context_counts[context_index] += 1
+                    if context_counts[context_index] > max_events:
+                        raise SourceSnapshotError(
+                            "Превышен лимит одного календарного контекста обучения",
+                            diagnostic_code="calendar_context_event_limit",
+                        )
+                    sequence += 1
+                    batch.append(
+                        (
+                            sequence,
+                            channel_index,
+                            _calendar_second(recorded_at),
+                            is_alarm,
+                            (
+                                None
+                                if pd.isna(numeric_values.at[index])
+                                else float(numeric_values.at[index])
+                            ),
+                            quality_code != "valid",
+                        )
+                    )
+                connection.executemany("INSERT INTO events VALUES (?, ?, ?, ?, ?, ?)", batch)
+                connection.commit()
+        connection.execute("CREATE INDEX events_recorded_at ON events(recorded_second)")
+        connection.commit()
+        connection.close()
+        return spool_path, sequence, scanned, skipped
+    except sqlite3.Error as error:
+        if "connection" in locals():
+            connection.close()
+        spool_path.unlink(missing_ok=True)
+        raise SourceSnapshotError(
+            "Не удалось записать компактный календарный spool",
+            diagnostic_code="calendar_spool_write",
+        ) from error
+    except Exception:
+        if "connection" in locals():
+            connection.close()
+        spool_path.unlink(missing_ok=True)
+        raise
+
+
+def _calendar_second(value: datetime) -> int:
+    """Компактно кодирует локальное wall-clock время без смены временной зоны."""
+    return int((value - datetime(1970, 1, 1)).total_seconds())
+
+
+def _non_overlapping_context_bounds(
+    intervals: tuple[tuple[datetime, datetime], ...],
+) -> tuple[tuple[datetime, ...], tuple[datetime, ...]]:
+    """Проверяет precondition бинарного поиска по неперекрывающимся окнам."""
+    if not intervals or any(
+        start > end or (index > 0 and start <= intervals[index - 1][1])
+        for index, (start, end) in enumerate(intervals)
+    ):
+        raise SourceSnapshotError(
+            "Календарные контексты пересекаются или не упорядочены",
+            diagnostic_code="calendar_context_overlap",
+        )
+    return tuple(start for start, _ in intervals), tuple(end for _, end in intervals)
+
+
+def _calendar_date_literals(
+    intervals: tuple[tuple[datetime, datetime], ...],
+) -> frozenset[str]:
+    """Предфильтровывает огромные CSV по дню до дорогого разбора timestamp."""
+    values: set[str] = set()
+    for start, end in intervals:
+        current = start.date()
+        while current <= end.date():
+            values.add(current.isoformat())
+            values.add(current.strftime("%d.%m.%Y"))
+            current += timedelta(days=1)
+    return frozenset(values)
+
+
+def _merge_calendar_intervals(
+    cutoffs: tuple[datetime, ...], *, before: timedelta, after: timedelta
+) -> tuple[tuple[datetime, datetime], ...]:
+    merged: list[tuple[datetime, datetime]] = []
+    for cutoff in cutoffs:
+        start, end = cutoff - before, cutoff + after
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+def _partition_year(path: Path) -> int | None:
+    match = YEAR_IN_FILENAME.search(path.name)
+    return int(match.group(1)) if match else None
+
+
+def _valid_training_timestamps(
+    chunk: pd.DataFrame,
+    expected_year: int | None,
+    *,
+    quarantine_partition_mismatch: bool = False,
+) -> tuple[pd.Series, int]:
+    complete_rows = (
+        chunk[list(EVENT_HEADERS)]
+        .fillna("")
+        .apply(lambda column: column.astype(str).str.len() > 0)
+        .all(axis=1)
+    )
+    timestamps = _parse_chunk_timestamps(chunk)
+    invalid_rows = timestamps.isna() | ~complete_rows
+    valid = timestamps.loc[~invalid_rows]
+    if expected_year is not None and not valid.empty:
+        mismatched = ~valid.dt.year.eq(expected_year)
+        if mismatched.any() and not quarantine_partition_mismatch:
+            raise SourceSnapshotError("Год события не соответствует годовой партиции журнала")
+        if mismatched.any():
+            invalid_rows.loc[valid.index[mismatched]] = True
+            valid = valid.loc[~mismatched]
+    return valid, int(invalid_rows.sum())
 
 
 def _read_training_events(
@@ -562,22 +966,35 @@ def _push_latest(
         heapq.heapreplace(heap, candidate)
 
 
-def _read_event_chunks(path: Path):
+def _read_event_chunks(path: Path, *, validate_rows: bool = True):
     """Потоково читает журнал C-парсером фиксированными порциями, не сохраняя журнал в памяти."""
     try:
-        _validate_journal_rows(path)
-        chunks = pd.read_csv(
-            path,
-            encoding="utf-8-sig",
-            dtype=str,
-            keep_default_na=False,
-            chunksize=EVENT_CHUNK_ROWS,
-        )
-        for chunk in chunks:
-            chunk.columns = [_normalize_header(column) for column in chunk.columns]
-            yield chunk
+        if validate_rows:
+            _validate_journal_rows(path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", pd.errors.ParserWarning)
+            chunks = pd.read_csv(
+                path,
+                encoding="utf-8-sig",
+                dtype=str,
+                keep_default_na=False,
+                chunksize=EVENT_CHUNK_ROWS,
+                index_col=False,
+                on_bad_lines="error",
+            )
+            for chunk in chunks:
+                chunk.columns = [_normalize_header(column) for column in chunk.columns]
+                yield chunk
+    except pd.errors.ParserWarning as error:
+        raise SourceSnapshotError(
+            "Строка журнала имеет неверное число полей",
+            diagnostic_code="journal_field_count",
+        ) from error
     except (OSError, UnicodeError, pd.errors.ParserError, KeyError) as error:
-        raise SourceSnapshotError("Журнал событий не удалось потоково прочитать") from error
+        raise SourceSnapshotError(
+            "Журнал событий не удалось потоково прочитать",
+            diagnostic_code="journal_parse_failed",
+        ) from error
 
 
 def _parse_chunk_timestamps(chunk: pd.DataFrame) -> pd.Series:

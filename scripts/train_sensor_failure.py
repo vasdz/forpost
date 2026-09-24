@@ -12,6 +12,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 import pandas as pd
@@ -27,7 +28,12 @@ for source_path in (
         sys.path.insert(0, str(source_path))
 
 from forpost_connectors.local_snapshot import SourceSnapshotError as SourceSnapshotError
-from forpost_connectors.local_snapshot import load_training_window
+from forpost_connectors.local_snapshot import (
+    cleanup_training_window,
+    load_training_context,
+    load_training_window,
+    training_source_fingerprint,
+)
 from forpost_prediction_core.capabilities import EvidenceTier, PredictionTask
 from forpost_prediction_core.config import load_ml_config
 from forpost_prediction_core.dataset import build_sensor_failure_dataset
@@ -89,6 +95,8 @@ def main() -> int:
         "config_sha256": None,
         "library_versions": {},
     }
+    window = None
+    source_fingerprint = None
     try:
         report_version = TypeAdapter(EvaluationVersion).validate_python(arguments.version)
         ml_config = load_ml_config(REPOSITORY_ROOT / "ml" / "config.yaml")
@@ -101,17 +109,45 @@ def main() -> int:
             config_sha256=ml_config.sha256,
         )
         stage = "source"
-        window = load_training_window(arguments.raw_root, max_events=ml_config.max_training_events)
+        source_fingerprint = training_source_fingerprint(arguments.raw_root)
         stage = "dataset"
-        events, channels = _to_frames(window.events, window.channels)
-        dataset = build_sensor_failure_dataset(
-            events,
-            channels,
-            horizon_hours=ml_config.horizon_hours,
-            cutoff_count=ml_config.cutoff_count,
-            minimum_history_events=3,
-            feature_windows_hours=ml_config.feature_windows_hours,
+        cache_paths = _dataset_cache_paths(arguments.evaluation_report, arguments.version)
+        dataset = _load_cached_dataset(
+            *cache_paths,
+            config_sha256=ml_config.sha256,
+            source_fingerprint=source_fingerprint,
         )
+        events = None
+        if dataset is None:
+            stage = "source"
+            window = load_training_window(
+                arguments.raw_root,
+                max_events=ml_config.max_training_events,
+                cutoff_count=ml_config.cutoff_count,
+                context_before_hours=max(ml_config.feature_windows_hours),
+                context_after_hours=ml_config.horizon_hours,
+            )
+            stage = "dataset"
+            if getattr(window, "spool_path", None) is None:
+                events, channels = _to_frames(window.events, window.channels)
+                dataset = build_sensor_failure_dataset(
+                    events,
+                    channels,
+                    horizon_hours=ml_config.horizon_hours,
+                    cutoff_count=ml_config.cutoff_count,
+                    minimum_history_events=3,
+                    feature_windows_hours=ml_config.feature_windows_hours,
+                    prediction_cutoffs=getattr(window, "prediction_cutoffs", None) or None,
+                )
+            else:
+                channels = _to_channel_frame(window.channels)
+                dataset, events = _build_spooled_dataset(window, channels, ml_config)
+            _write_cached_dataset(
+                dataset,
+                *cache_paths,
+                config_sha256=ml_config.sha256,
+                source_fingerprint=source_fingerprint,
+            )
         stage = "rolling_validation"
         schema_evidence["library_versions"] = {
             package: importlib.metadata.version(package) for package in sorted(LIBRARY_NAMES)
@@ -124,6 +160,16 @@ def main() -> int:
             evidence=evidence,
         )
         stage = "inference"
+        if events is None:
+            window = load_training_window(
+                arguments.raw_root,
+                max_events=ml_config.max_training_events,
+                cutoff_count=ml_config.cutoff_count,
+                context_before_hours=max(ml_config.feature_windows_hours),
+                context_after_hours=ml_config.horizon_hours,
+            )
+            channels = _to_channel_frame(window.channels)
+            events = _latest_spooled_context(window, ml_config)
         inference_started = time.perf_counter()
         current = _current_features(
             events,
@@ -162,7 +208,7 @@ def main() -> int:
             purge_hours=ml_config.training.purge_hours,
             dataset_start_at=dataset_times.min().to_pydatetime(),
             dataset_end_at=dataset_times.max().to_pydatetime(),
-            source_event_count=len(window.events),
+            source_event_count=getattr(window, "selected_event_count", len(window.events)),
             skipped_source_event_count=window.skipped_event_count,
             history_truncated_before=window.truncated_before,
             fit_row_count=result.fit_row_count,
@@ -179,7 +225,9 @@ def main() -> int:
             payload,
             parity_features=current.loc[:, result.feature_columns],
         )
-    except Exception:
+    except Exception as error:
+        if window is not None:
+            cleanup_training_window(window)
         # Граница CLI скрывает также ошибки нативных библиотек; interrupt не перехватывается.
         failure_stage = evidence.stage if stage == "rolling_validation" else stage
         reason_code = {
@@ -203,9 +251,16 @@ def main() -> int:
             reason_code=reason_code,
             schema_evidence=schema_evidence,
         )
-        print(f"Обучение не опубликовано: {reason_code}", file=sys.stderr)
+        if isinstance(error, SourceSnapshotError):
+            diagnostic_code = error.diagnostic_code
+        elif isinstance(error, TrainingUnavailableError):
+            diagnostic_code = f"training_{evidence.diagnostics.get('step', evidence.stage)}"
+        else:
+            diagnostic_code = None
+        diagnostic_suffix = f":{diagnostic_code}" if diagnostic_code is not None else ""
+        print(f"Обучение не опубликовано: {reason_code}{diagnostic_suffix}", file=sys.stderr)
         return 1
-    if not _save_report(
+    report_saved = _save_report(
         arguments,
         evidence,
         version=report_version,
@@ -213,7 +268,9 @@ def main() -> int:
         horizon_hours=horizon_hours,
         result=result,
         schema_evidence=schema_evidence,
-    ):
+    )
+    cleanup_training_window(window)
+    if not report_saved:
         return 1
     summary = {
         "status": "published",
@@ -284,8 +341,8 @@ def _save_report(
     return True
 
 
-def _to_frames(events, channels) -> tuple[pd.DataFrame, pd.DataFrame]:
-    event_frame = pd.DataFrame(
+def _to_event_frame(events) -> pd.DataFrame:
+    return pd.DataFrame(
         [
             {
                 "channel_id": event.channel_id,
@@ -298,13 +355,136 @@ def _to_frames(events, channels) -> tuple[pd.DataFrame, pd.DataFrame]:
             for event in events
         ]
     )
-    channel_frame = pd.DataFrame(
+
+
+def _to_channel_frame(channels) -> pd.DataFrame:
+    return pd.DataFrame(
         [
             {"channel_id": channel.channel_id, "sensor_type": channel.sensor_type}
             for channel in channels
         ]
     )
-    return event_frame, channel_frame
+
+
+def _to_frames(events, channels) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Совместимость тестов и tail-режима с общей нормализацией frames."""
+    return _to_event_frame(events), _to_channel_frame(channels)
+
+
+def _build_spooled_dataset(window, channels: pd.DataFrame, ml_config):
+    """Строит признаки по одному cutoff, не загружая весь календарный corpus в RAM."""
+    frames: list[pd.DataFrame] = []
+    latest_events: pd.DataFrame | None = None
+    for cutoff in window.prediction_cutoffs:
+        context = load_training_context(
+            window,
+            cutoff,
+            context_before_hours=max(ml_config.feature_windows_hours),
+            context_after_hours=ml_config.horizon_hours,
+        )
+        if not context:
+            continue
+        events = _to_event_frame(context)
+        try:
+            frame = build_sensor_failure_dataset(
+                events,
+                channels,
+                horizon_hours=ml_config.horizon_hours,
+                cutoff_count=1,
+                minimum_history_events=3,
+                feature_windows_hours=ml_config.feature_windows_hours,
+                prediction_cutoffs=(cutoff,),
+            )
+        except ValueError as error:
+            if str(error) != "Недостаточно истории для point-in-time набора":
+                raise
+            continue
+        frames.append(frame)
+        latest_events = events
+    if not frames or latest_events is None:
+        raise ValueError("Недостаточно истории для point-in-time набора")
+    return (
+        pd.concat(frames, ignore_index=True).sort_values(
+            ["prediction_at", "channel_id"], kind="stable", ignore_index=True
+        ),
+        latest_events,
+    )
+
+
+def _latest_spooled_context(window, ml_config) -> pd.DataFrame:
+    for cutoff in reversed(window.prediction_cutoffs):
+        context = load_training_context(
+            window,
+            cutoff,
+            context_before_hours=max(ml_config.feature_windows_hours),
+            context_after_hours=ml_config.horizon_hours,
+        )
+        if context:
+            return _to_event_frame(context)
+    raise ValueError("Нет событий для current inference")
+
+
+def _dataset_cache_paths(report_path: Path, version: str) -> tuple[Path, Path]:
+    stem = f"ml-training-dataset-{version}"
+    return report_path.with_name(f"{stem}.csv"), report_path.with_name(f"{stem}.json")
+
+
+def _load_cached_dataset(
+    csv_path: Path,
+    metadata_path: Path,
+    *,
+    config_sha256: str,
+    source_fingerprint: str,
+) -> pd.DataFrame | None:
+    if not csv_path.is_file() or not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata != {
+            "format_version": 1,
+            "config_sha256": config_sha256,
+            "source_fingerprint": source_fingerprint,
+            "columns": metadata.get("columns"),
+        } or not isinstance(metadata["columns"], list):
+            return None
+        dataset = pd.read_csv(csv_path)
+        if list(dataset.columns) != metadata["columns"] or dataset.empty:
+            return None
+        dataset["prediction_at"] = normalize_event_times(dataset["prediction_at"])
+        if not dataset["silence_label"].isin((0, 1)).all():
+            return None
+        return dataset
+    except (OSError, UnicodeError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def _write_cached_dataset(
+    dataset: pd.DataFrame,
+    csv_path: Path,
+    metadata_path: Path,
+    *,
+    config_sha256: str,
+    source_fingerprint: str,
+) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "format_version": 1,
+        "config_sha256": config_sha256,
+        "source_fingerprint": source_fingerprint,
+        "columns": list(dataset.columns),
+    }
+    with NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="", dir=csv_path.parent, delete=False
+    ) as temporary_csv:
+        temporary_csv_path = Path(temporary_csv.name)
+        dataset.to_csv(temporary_csv, index=False)
+    with NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=metadata_path.parent, delete=False
+    ) as temporary_metadata:
+        temporary_metadata_path = Path(temporary_metadata.name)
+        json.dump(metadata, temporary_metadata, ensure_ascii=False, sort_keys=True)
+    temporary_csv_path.replace(csv_path)
+    temporary_metadata_path.replace(metadata_path)
 
 
 def _public_metrics(metrics) -> dict[str, float]:

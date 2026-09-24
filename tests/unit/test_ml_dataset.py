@@ -204,6 +204,64 @@ def test_cutoffs_are_uniform_in_calendar_time_not_event_density() -> None:
     assert gaps.max() - gaps.min() <= 0.001
 
 
+def test_dataset_honours_source_selected_calendar_cutoffs() -> None:
+    """Ловит повторный выбор cutoff по границам разреженного window corpus."""
+    times = pd.date_range("2026-01-01", periods=240, freq="h", tz="UTC")
+    events = pd.DataFrame(
+        {
+            "channel_id": ["a"] * len(times),
+            "observed_at": times,
+            "sensor_value": [1.0] * len(times),
+        }
+    )
+    requested = pd.DatetimeIndex(
+        [pd.Timestamp("2026-01-04T00:00:00Z"), pd.Timestamp("2026-01-08T00:00:00Z")]
+    )
+
+    dataset = build_sensor_failure_dataset(
+        events,
+        pd.DataFrame({"channel_id": ["a"]}),
+        horizon_hours=24,
+        cutoff_count=2,
+        minimum_history_events=1,
+        feature_windows_hours=(24,),
+        prediction_cutoffs=requested,
+    )
+
+    assert tuple(dataset["prediction_at"].drop_duplicates()) == tuple(requested)
+
+
+def test_dataset_skips_empty_partition_calendar_endpoints() -> None:
+    """Ловит отказ sparse corpus из-за пустых календарных точек по краям года."""
+    times = pd.date_range("2026-01-04", periods=96, freq="h", tz="UTC")
+    events = pd.DataFrame(
+        {
+            "channel_id": ["a"] * len(times),
+            "observed_at": times,
+            "sensor_value": [1.0] * len(times),
+        }
+    )
+    requested = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2026-01-02T00:00:00Z"),
+            pd.Timestamp("2026-01-06T00:00:00Z"),
+            pd.Timestamp("2026-12-31T00:00:00Z"),
+        ]
+    )
+
+    dataset = build_sensor_failure_dataset(
+        events,
+        pd.DataFrame({"channel_id": ["a"]}),
+        horizon_hours=24,
+        cutoff_count=3,
+        minimum_history_events=1,
+        feature_windows_hours=(24,),
+        prediction_cutoffs=requested,
+    )
+
+    assert tuple(dataset["prediction_at"].drop_duplicates()) == (requested[1],)
+
+
 def test_sorted_time_slice_avoids_boolean_full_frame_scan(monkeypatch) -> None:
     """Ловит возврат O(cutoffs * all_rows) масок по полной таблице."""
     times = pd.date_range("2026-01-01", periods=100, freq="h", tz="UTC")

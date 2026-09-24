@@ -3,7 +3,8 @@ seed: 20260915
 feature_schema_version: "6"
 label_strategy: "cadence_adjusted_silence_horizon_proxy_v2"
 horizon_hours: 24
-cutoff_count: 48
+# 64 label-free точки дают запас class/time support; corpus читается per-cutoff из disk spool.
+cutoff_count: 64
 max_training_events: 3000000
 feature_windows_hours: [1, 6, 24, 72, 168]
 minimum_positive_examples: 50

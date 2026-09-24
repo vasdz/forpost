@@ -20,6 +20,7 @@ def build_sensor_failure_dataset(
     cutoff_count: int = 12,
     minimum_history_events: int = 3,
     feature_windows_hours: Sequence[int] = DEFAULT_FEATURE_WINDOWS_HOURS,
+    prediction_cutoffs: Sequence[object] | None = None,
 ) -> pd.DataFrame:
     """Строит утверждённый proxy-набор тишины без утечки событий после cutoff."""
     normalized, cutoffs = _prepare_sensor_failure_inputs(
@@ -29,6 +30,7 @@ def build_sensor_failure_dataset(
         cutoff_count=cutoff_count,
         minimum_history_events=minimum_history_events,
         feature_windows_hours=feature_windows_hours,
+        prediction_cutoffs=prediction_cutoffs,
     )
     layout = _build_label_layout(
         normalized,
@@ -63,6 +65,7 @@ def build_sensor_failure_label_layout(
     cutoff_count: int = 12,
     minimum_history_events: int = 3,
     feature_windows_hours: Sequence[int] = DEFAULT_FEATURE_WINDOWS_HOURS,
+    prediction_cutoffs: Sequence[object] | None = None,
 ) -> pd.DataFrame:
     """Строит только зрелые proxy-лейблы для проверки layout до расчёта признаков."""
     normalized, cutoffs = _prepare_sensor_failure_inputs(
@@ -72,6 +75,7 @@ def build_sensor_failure_label_layout(
         cutoff_count=cutoff_count,
         minimum_history_events=minimum_history_events,
         feature_windows_hours=feature_windows_hours,
+        prediction_cutoffs=prediction_cutoffs,
     )
     return _build_label_layout(
         normalized,
@@ -91,8 +95,10 @@ def _prepare_sensor_failure_inputs(
     cutoff_count: int,
     minimum_history_events: int,
     feature_windows_hours: Sequence[int],
+    prediction_cutoffs: Sequence[object] | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex]:
-    if horizon_hours < 1 or cutoff_count < 2 or minimum_history_events < 1:
+    minimum_cutoff_count = 1 if prediction_cutoffs is not None else 2
+    if horizon_hours < 1 or cutoff_count < minimum_cutoff_count or minimum_history_events < 1:
         raise ValueError("Параметры временного набора должны быть положительными")
     if not feature_windows_hours or any(window < 1 for window in feature_windows_hours):
         raise ValueError("Окна признаков должны быть положительными")
@@ -110,12 +116,23 @@ def _prepare_sensor_failure_inputs(
     normalized = normalized.sort_values("observed_at", kind="stable").reset_index(drop=True)
 
     warmup_hours = max(horizon_hours, *feature_windows_hours)
-    first = normalized["observed_at"].min() + pd.Timedelta(hours=warmup_hours)
-    last = normalized["observed_at"].max() - pd.Timedelta(hours=horizon_hours)
-    if first > last:
-        raise ValueError("История короче двух горизонтов прогнозирования")
-    cutoff_ns = np.linspace(first.value, last.value, cutoff_count, dtype=np.int64)
-    cutoffs = pd.DatetimeIndex(pd.to_datetime(np.unique(cutoff_ns), utc=True))
+    if prediction_cutoffs is None:
+        first = normalized["observed_at"].min() + pd.Timedelta(hours=warmup_hours)
+        last = normalized["observed_at"].max() - pd.Timedelta(hours=horizon_hours)
+        if first > last:
+            raise ValueError("История короче двух горизонтов прогнозирования")
+        cutoff_ns = np.linspace(first.value, last.value, cutoff_count, dtype=np.int64)
+        cutoffs = pd.DatetimeIndex(pd.to_datetime(np.unique(cutoff_ns), utc=True))
+    else:
+        cutoff_series = normalize_event_times(pd.Series(tuple(prediction_cutoffs)))
+        cutoffs = pd.DatetimeIndex(cutoff_series)
+        if (
+            cutoffs.hasnans
+            or len(cutoffs) != cutoff_count
+            or not cutoffs.is_monotonic_increasing
+            or cutoffs.has_duplicates
+        ):
+            raise ValueError("Календарные точки прогнозирования не соответствуют истории")
 
     return normalized, cutoffs
 
