@@ -23,13 +23,15 @@ describe('same-origin backend routes', () => {
   });
 
   it('проксирует чтение прогнозов, оценки с пользовательской demo-сессией и доступности только на фиксированные пути', async () => {
-    await getPredictions();
+    await getPredictions(new Request('http://127.0.0.1/api/predictions', {
+      headers: { cookie: `forpost_demo_session=${DEMO_ASSERTION}; forpost_csrf=${'c'.repeat(40)}` },
+    }));
     await getModelEvaluation(new Request('http://127.0.0.1/api/model-evaluation', {
       headers: { cookie: `forpost_demo_session=${DEMO_ASSERTION}; forpost_csrf=${'c'.repeat(40)}` },
     }));
     await getAvailability();
 
-    expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(1, '/api/predictions');
+    expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(1, '/api/predictions', { credential: DEMO_ASSERTION });
     expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(2, '/api/model-evaluation', { credential: DEMO_ASSERTION });
     expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(3, '/api/availability');
   });
