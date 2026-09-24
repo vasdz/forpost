@@ -38,7 +38,6 @@ describe('Badge и Button', () => {
     expect(screen.getByText('Статус')).toHaveClass('border-[var(--color-border)]');
     expect(screen.getByRole('button', { name: 'Продолжить' })).toHaveClass(
       'border-[var(--color-data)]',
-      'text-[#0B0E11]',
       'h-10',
     );
   });

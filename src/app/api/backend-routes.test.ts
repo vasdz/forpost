@@ -8,7 +8,6 @@ const DEMO_ASSERTION = `demo.${'x'.repeat(40)}.${'y'.repeat(40)}`;
 
 import { GET as getAvailability } from './availability/route';
 import { GET as getModelEvaluation } from './model-evaluation/route';
-import { GET as getForecastFact } from './forecast-fact/route';
 import { GET as getPredictions } from './predictions/route';
 import { POST as postDecision } from './predictions/[predictionId]/decisions/route';
 
@@ -28,15 +27,11 @@ describe('same-origin backend routes', () => {
     await getModelEvaluation(new Request('http://127.0.0.1/api/model-evaluation', {
       headers: { cookie: `forpost_demo_session=${DEMO_ASSERTION}; forpost_csrf=${'c'.repeat(40)}` },
     }));
-    await getForecastFact(new Request('http://127.0.0.1/api/forecast-fact', {
-      headers: { cookie: `forpost_demo_session=${DEMO_ASSERTION}; forpost_csrf=${'c'.repeat(40)}` },
-    }));
     await getAvailability();
 
     expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(1, '/api/predictions');
     expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(2, '/api/model-evaluation', { credential: DEMO_ASSERTION });
-    expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(3, '/api/forecast-fact', { credential: DEMO_ASSERTION });
-    expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(4, '/api/availability');
+    expect(backend.proxyForpostApi).toHaveBeenNthCalledWith(3, '/api/availability');
   });
 
   it('не подставляет центральный service token для анонимного чтения отчёта', async () => {

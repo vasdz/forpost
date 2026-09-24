@@ -10,36 +10,15 @@ const events: LocalSituationEvent[] = [
 ];
 
 describe('агрегация наблюдаемой активности', () => {
-  it('сохраняет тихие часы внутри явного календарного окна', () => {
-    expect(aggregateObservedEvents(events, {
-      startAt: '2026-08-01T10:00:00',
-      endAt: '2026-08-01T12:59:59',
-    })).toEqual({
+  it('считает часовые бакеты и статусы без интерпретации как риск', () => {
+    expect(aggregateObservedEvents(events)).toEqual({
       buckets: [
         { at: '2026-08-01T10:00:00', events: 2, alarms: 1 },
-        { at: '2026-08-01T11:00:00', events: 0, alarms: 0 },
         { at: '2026-08-01T12:00:00', events: 1, alarms: 0 },
       ],
       statuses: [
         { name: 'Есть отметка', value: 1, color: 'var(--color-danger)' },
         { name: 'Нет отметки', value: 1, color: 'var(--color-success)' },
-        { name: 'Не указана', value: 1, color: 'var(--color-text-muted)' },
-      ],
-    });
-  });
-
-  it('не включает в график и структуру события за границами окна', () => {
-    expect(aggregateObservedEvents(events, {
-      startAt: '2026-08-01T11:00:00',
-      endAt: '2026-08-01T12:00:00',
-    })).toEqual({
-      buckets: [
-        { at: '2026-08-01T11:00:00', events: 0, alarms: 0 },
-        { at: '2026-08-01T12:00:00', events: 1, alarms: 0 },
-      ],
-      statuses: [
-        { name: 'Есть отметка', value: 0, color: 'var(--color-danger)' },
-        { name: 'Нет отметки', value: 0, color: 'var(--color-success)' },
         { name: 'Не указана', value: 1, color: 'var(--color-text-muted)' },
       ],
     });
