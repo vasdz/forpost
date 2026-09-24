@@ -33,6 +33,17 @@ def test_malformed_yaml_is_translated_to_safe_controlled_error(tmp_path, content
     assert error.value.__suppress_context__
 
 
+def test_config_rejects_stale_or_arbitrary_feature_schema(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    payload = yaml.safe_load((root / "ml" / "config.yaml").read_text(encoding="utf-8"))
+    payload["feature_schema_version"] = "7"
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="схем"):
+        load_ml_config(path)
+
+
 @pytest.mark.parametrize(
     "change", ["fold_type", "too_few", "unknown_profile", "unknown_constraint", "balanced_mismatch"]
 )

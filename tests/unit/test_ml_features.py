@@ -523,6 +523,24 @@ def test_expected_observation_outside_horizon_is_censored() -> None:
     assert labels.empty
 
 
+def test_label_records_stable_deadline_episode() -> None:
+    """Ловит потерю идентичности channel/deadline episode для layout sweep."""
+    events = pd.DataFrame(
+        {
+            "channel_id": ["a"] * 4,
+            "observed_at": pd.date_range("2025-01-01", periods=4, freq="h", tz="UTC"),
+            "analysis_eligible": [True] * 4,
+        }
+    )
+    cutoff = pd.Timestamp("2025-01-01T03:06:00Z")
+
+    labels = label_silence_horizon(
+        events, pd.DataFrame({"channel_id": ["a"]}), cutoff, horizon_hours=24
+    )
+
+    assert labels.loc[0, "expected_deadline"] == pd.Timestamp("2025-01-01T04:15:00Z")
+
+
 def test_temporal_split_keeps_future_rows_out_of_training() -> None:
     """Ловит случайное перемешивание строк между train, validation и test."""
     frame = pd.DataFrame(

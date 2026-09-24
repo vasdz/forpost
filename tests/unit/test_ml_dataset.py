@@ -26,7 +26,13 @@ def test_default_dataset_warms_up_weekly_features_and_matches_inference() -> Non
         pd.testing.assert_frame_equal(frame[feature_columns].reset_index(drop=True), expected)
     from scripts.train_sensor_failure import _current_features
 
-    inference = _current_features(events, channels, tuple(feature_columns), (1, 6, 24, 72, 168))
+    inference = _current_features(
+        events,
+        channels,
+        tuple(feature_columns),
+        (1, 6, 24, 72, 168),
+        horizon_hours=24,
+    )
     assert tuple(inference.loc[:, feature_columns].columns) == tuple(feature_columns)
 
 
@@ -143,9 +149,76 @@ def test_label_layout_matches_the_training_dataset_without_building_features() -
     dataset = build_sensor_failure_dataset(events, channels, **options)
 
     pd.testing.assert_frame_equal(
-        layout,
+        layout.loc[:, ["channel_id", "silence_label", "prediction_at"]],
         dataset.loc[:, ["channel_id", "silence_label", "prediction_at"]].reset_index(drop=True),
     )
+
+
+def test_dataset_includes_event_exactly_at_horizon_deadline() -> None:
+    """Ловит исключение своевременного события на правой границе horizon."""
+    cutoff = pd.Timestamp("2026-01-04T00:00:00Z")
+    cadence = pd.Timedelta(hours=19.28)
+    last = cutoff - pd.Timedelta(minutes=6)
+    history = pd.DatetimeIndex([last - 3 * cadence, last - 2 * cadence, last - cadence, last])
+    deadline = cutoff + pd.Timedelta(hours=24)
+    normalized = pd.DataFrame(
+        {
+            "channel_id": ["a"] * 5,
+            "observed_at": history.append(pd.DatetimeIndex([deadline])),
+            "sensor_value": [1.0] * 5,
+        }
+    ).sort_values("observed_at", ignore_index=True)
+
+    layout = dataset_module._build_label_layout(
+        normalized,
+        pd.DataFrame({"channel_id": ["a"]}),
+        pd.DatetimeIndex([cutoff]),
+        horizon_hours=24,
+        minimum_history_events=3,
+        feature_windows_hours=(168,),
+    )
+
+    assert layout.loc[0, "expected_deadline"] == deadline
+    assert layout.loc[0, "silence_label"] == 0
+
+
+def test_cutoffs_are_uniform_in_calendar_time_not_event_density() -> None:
+    """Ловит выбор cutoff по позициям событий вместо календарной оси."""
+    dense = pd.date_range("2026-01-01", periods=200, freq="10min", tz="UTC")
+    sparse = pd.date_range("2026-01-10", periods=20, freq="6h", tz="UTC")
+    times = dense.append(sparse)
+    events = pd.DataFrame(
+        {"channel_id": ["a"] * len(times), "observed_at": times, "sensor_value": 1.0}
+    )
+
+    _normalized, cutoffs = dataset_module._prepare_sensor_failure_inputs(
+        events,
+        pd.DataFrame({"channel_id": ["a"]}),
+        horizon_hours=24,
+        cutoff_count=8,
+        minimum_history_events=3,
+        feature_windows_hours=(24,),
+    )
+
+    gaps = cutoffs.to_series().diff().dropna().dt.total_seconds()
+    assert gaps.max() - gaps.min() <= 0.001
+
+
+def test_sorted_time_slice_avoids_boolean_full_frame_scan(monkeypatch) -> None:
+    """Ловит возврат O(cutoffs * all_rows) масок по полной таблице."""
+    times = pd.date_range("2026-01-01", periods=100, freq="h", tz="UTC")
+    frame = pd.DataFrame({"observed_at": times, "value": range(100)})
+
+    def forbidden_comparison(*_args, **_kwargs):
+        raise AssertionError("Временной slice не должен строить full-frame boolean mask")
+
+    monkeypatch.setattr(pd.Series, "__ge__", forbidden_comparison)
+    monkeypatch.setattr(pd.Series, "__le__", forbidden_comparison)
+    sliced = dataset_module._slice_sorted_events(
+        frame, pd.Timestamp("2026-01-02T00:00:00Z"), pd.Timestamp("2026-01-02T03:00:00Z")
+    )
+
+    assert sliced["value"].tolist() == [24, 25, 26, 27]
 
 
 def test_dataset_rejects_when_every_candidate_label_is_censored() -> None:

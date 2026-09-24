@@ -130,6 +130,7 @@ def main() -> int:
             channels,
             result.feature_columns,
             ml_config.feature_windows_hours,
+            horizon_hours=ml_config.horizon_hours,
         )
         payload = _prediction_payload(
             current,
@@ -324,8 +325,11 @@ def _current_features(
     channels: pd.DataFrame,
     feature_columns: tuple[str, ...],
     feature_windows_hours: tuple[int, ...],
+    *,
+    horizon_hours: int,
 ) -> pd.DataFrame:
     from forpost_prediction_core.features import build_channel_features
+    from forpost_prediction_core.labeling import eligible_channel_cadences
 
     observed_at = normalize_event_times(events["observed_at"])
     cutoff = observed_at.max() + pd.Timedelta(seconds=1)
@@ -333,14 +337,11 @@ def _current_features(
         observed_at >= cutoff - pd.Timedelta(hours=max(feature_windows_hours))
     ].copy()
     features = build_channel_features(recent, channels, cutoff, windows=feature_windows_hours)
-    eligible = (
-        recent["analysis_eligible"].fillna(False).astype(bool)
-        if "analysis_eligible" in recent
-        else pd.Series(True, index=recent.index)
+    target_population = eligible_channel_cadences(
+        recent, channels, cutoff, horizon_hours=horizon_hours
     )
-    history_counts = recent.loc[eligible].groupby("channel_id").size()
     features = features.loc[
-        features["channel_id"].isin(set(history_counts[history_counts >= 3].index))
+        features["channel_id"].isin(set(target_population["channel_id"]))
     ].copy()
     features["prediction_at"] = cutoff
     if any(column not in features for column in feature_columns):

@@ -18,6 +18,7 @@ from forpost_prediction_core.registry import (
     validate_model_metadata,
 )
 from forpost_prediction_core.training import TrainingConfig, train_champion
+from pydantic import ValidationError
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
 from sklearn.linear_model import LogisticRegression
@@ -86,7 +87,7 @@ def test_registry_publishes_and_loads_verified_skops_bundle(tmp_path: Path) -> N
     loaded = load_model_bundle(
         bundle_path,
         expected_task=PredictionTask.SENSOR_FAILURE,
-        expected_feature_schema_version="2",
+        expected_feature_schema_version="6",
         maximum_evidence_tier=EvidenceTier.PROXY,
     )
 
@@ -122,7 +123,7 @@ def test_registry_rejects_evidence_promotion(tmp_path: Path) -> None:
         load_model_bundle(
             bundle_path,
             expected_task=PredictionTask.SENSOR_FAILURE,
-            expected_feature_schema_version="2",
+            expected_feature_schema_version="6",
             maximum_evidence_tier=EvidenceTier.VALIDATED,
         )
 
@@ -224,7 +225,7 @@ def test_trained_champion_roundtrips_through_secure_registry(tmp_path: Path) -> 
     card = ModelCard(
         task=PredictionTask.SENSOR_FAILURE,
         version="v1",
-        feature_schema_version="2",
+        feature_schema_version="6",
         evidence_tier=EvidenceTier.PROXY,
         calibrated=True,
         created_at=datetime(2026, 9, 18, tzinfo=UTC),
@@ -244,7 +245,7 @@ def test_trained_champion_roundtrips_through_secure_registry(tmp_path: Path) -> 
     loaded = load_model_bundle(
         bundle_path,
         expected_task=PredictionTask.SENSOR_FAILURE,
-        expected_feature_schema_version="2",
+        expected_feature_schema_version="6",
         maximum_evidence_tier=EvidenceTier.PROXY,
     )
 
@@ -256,7 +257,7 @@ def _model_card() -> ModelCard:
     return ModelCard(
         task=PredictionTask.SENSOR_FAILURE,
         version="v1",
-        feature_schema_version="2",
+        feature_schema_version="6",
         evidence_tier=EvidenceTier.PROXY,
         calibrated=True,
         created_at=datetime(2026, 9, 18, tzinfo=UTC),
@@ -266,6 +267,14 @@ def _model_card() -> ModelCard:
         test_metrics=_complete_metrics(precision=0.78, recall=0.68, f1=0.72),
         **_audit_fields(),
     )
+
+
+def test_model_card_rejects_non_current_feature_schema() -> None:
+    payload = _model_card().model_dump(mode="python")
+    payload["feature_schema_version"] = "7"
+
+    with pytest.raises(ValidationError):
+        ModelCard.model_validate(payload)
 
 
 def _metric_payload(metrics) -> dict[str, float]:
@@ -392,7 +401,7 @@ def _load(path):
     return load_model_bundle(
         path,
         expected_task=PredictionTask.SENSOR_FAILURE,
-        expected_feature_schema_version="2",
+        expected_feature_schema_version="6",
         maximum_evidence_tier=EvidenceTier.PROXY,
     )
 

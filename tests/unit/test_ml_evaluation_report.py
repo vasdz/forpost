@@ -103,6 +103,14 @@ def test_report_roundtrip_retains_only_exact_evidence(reports, tmp_path, status)
     assert loaded.model_dump(mode="json") == report_payload(status)
 
 
+def test_report_rejects_non_current_feature_schema(reports):
+    payload = report_payload()
+    payload["feature_schema_version"] = "7"
+
+    with pytest.raises(ValidationError):
+        reports.EvaluationReport.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -384,7 +392,7 @@ def command(tmp_path, monkeypatch):
         horizon_hours=48,
         cutoff_count=80,
         feature_windows_hours=(24,),
-        feature_schema_version="sensor-failure-v1",
+        feature_schema_version="6",
         label_strategy="cadence_adjusted_silence_horizon_proxy_v2",
         sha256="a" * 64,
         training=TrainingConfig(
@@ -415,7 +423,7 @@ def command(tmp_path, monkeypatch):
         "build_sensor_failure_dataset",
         lambda *_args, **_kwargs: frame.assign(evidence_tier="proxy"),
     )
-    monkeypatch.setattr(module, "_current_features", lambda *_args: frame.tail(4))
+    monkeypatch.setattr(module, "_current_features", lambda *_args, **_kwargs: frame.tail(4))
     return module, arguments, config
 
 
@@ -498,6 +506,51 @@ def test_inference_budget_includes_current_feature_building(command, reports, mo
     assert report.reason_code == "inference_unavailable"
     assert report.test_metrics is None
     assert not arguments.registry_root.exists()
+
+
+def test_inference_scores_only_the_cadence_label_target_population():
+    """Ловит train-serving skew для нестабильных, duplicate, overdue и long-cadence каналов."""
+    from scripts import train_sensor_failure as module
+
+    cutoff = pd.Timestamp("2026-01-10T12:00:00Z")
+    channel_times = {
+        "eligible": [-3.0, -2.0, -1.0, -0.1],
+        "unstable": [-11.0, -10.0, -2.0, -1.0],
+        "duplicate": [-1.0, -1.0, -1.0, -1.0],
+        "overdue": [-10.0, -9.0, -8.0, -7.0],
+        "too_long": [-60.5, -40.5, -20.5, -0.5],
+    }
+    rows = [
+        {
+            "channel_id": channel_id,
+            "observed_at": cutoff + pd.Timedelta(hours=offset),
+            "sensor_value": 1.0,
+            "analysis_eligible": True,
+        }
+        for channel_id, offsets in channel_times.items()
+        for offset in offsets
+    ]
+    # Определяет общий inference cutoff без добавления ещё одного канала.
+    rows.append(
+        {
+            "channel_id": "eligible",
+            "observed_at": cutoff - pd.Timedelta(seconds=1),
+            "sensor_value": 1.0,
+            "analysis_eligible": True,
+        }
+    )
+    events = pd.DataFrame(rows)
+    channels = pd.DataFrame({"channel_id": list(channel_times)})
+
+    current = module._current_features(
+        events,
+        channels,
+        ("hours_since_last_event",),
+        (1, 24, 72),
+        horizon_hours=24,
+    )
+
+    assert set(current["channel_id"]) == {"eligible"}
 
 
 def test_command_writes_exact_local_validation_diagnostics(command, reports):

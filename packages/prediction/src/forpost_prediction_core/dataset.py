@@ -42,12 +42,11 @@ def build_sensor_failure_dataset(
     context_before = pd.Timedelta(hours=max(feature_windows_hours))
     context_after = pd.Timedelta(hours=horizon_hours)
     for cutoff, cutoff_labels in layout.groupby("prediction_at", sort=False):
-        context = normalized.loc[
-            (normalized["observed_at"] >= cutoff - context_before)
-            & (normalized["observed_at"] < cutoff + context_after)
-        ]
+        context = _slice_sorted_events(normalized, cutoff - context_before, cutoff + context_after)
         features = build_channel_features(context, channels, cutoff, windows=feature_windows_hours)
-        frame = features.merge(cutoff_labels.drop(columns="prediction_at"), on="channel_id")
+        frame = features.merge(
+            cutoff_labels.loc[:, ["channel_id", "silence_label"]], on="channel_id"
+        )
         frame["prediction_at"] = cutoff
         frame["evidence_tier"] = "proxy"
         frames.append(frame)
@@ -115,31 +114,8 @@ def _prepare_sensor_failure_inputs(
     last = normalized["observed_at"].max() - pd.Timedelta(hours=horizon_hours)
     if first > last:
         raise ValueError("История короче двух горизонтов прогнозирования")
-    candidate_cutoffs = (
-        normalized.loc[
-            (normalized["observed_at"] >= first) & (normalized["observed_at"] < last),
-            "observed_at",
-        ]
-        .drop_duplicates()
-        .sort_values(kind="stable")
-        .reset_index(drop=True)
-    )
-    if len(candidate_cutoffs) >= 2:
-        positions = np.linspace(
-            0,
-            len(candidate_cutoffs) - 1,
-            min(cutoff_count, len(candidate_cutoffs)),
-            dtype=np.int64,
-        )
-        # Опорное событие уже наблюдалось к cutoff и не должно попадать в future label.
-        cutoffs = pd.DatetimeIndex(
-            candidate_cutoffs.iloc[np.unique(positions)] + pd.Timedelta(microseconds=1)
-        )
-    else:
-        # Малый разреженный fixture может не иметь двух внутренних событий;
-        # границы остаются причинными и позволяют проверить контракт набора.
-        cutoff_ns = np.linspace(first.value, last.value, cutoff_count, dtype=np.int64)
-        cutoffs = pd.to_datetime(np.unique(cutoff_ns), utc=True)
+    cutoff_ns = np.linspace(first.value, last.value, cutoff_count, dtype=np.int64)
+    cutoffs = pd.DatetimeIndex(pd.to_datetime(np.unique(cutoff_ns), utc=True))
 
     return normalized, cutoffs
 
@@ -157,18 +133,13 @@ def _build_label_layout(
     context_before = pd.Timedelta(hours=max(feature_windows_hours))
     context_after = pd.Timedelta(hours=horizon_hours)
     for cutoff in cutoffs:
-        context = normalized.loc[
-            (normalized["observed_at"] >= cutoff - context_before)
-            & (normalized["observed_at"] < cutoff + context_after)
-        ]
+        context = _slice_sorted_events(normalized, cutoff - context_before, cutoff + context_after)
         history_counts = context.loc[context["observed_at"] < cutoff].groupby("channel_id").size()
         eligible_channels = set(history_counts[history_counts >= minimum_history_events].index)
         if not eligible_channels:
             continue
         labels = label_silence_horizon(context, channels, cutoff, horizon_hours=horizon_hours)
-        labels = labels.loc[
-            labels["channel_id"].isin(eligible_channels), ["channel_id", "silence_label"]
-        ].copy()
+        labels = labels.loc[labels["channel_id"].isin(eligible_channels)].copy()
         if labels.empty:
             continue
         labels["prediction_at"] = cutoff
@@ -178,3 +149,13 @@ def _build_label_layout(
     return pd.concat(frames, ignore_index=True).sort_values(
         ["prediction_at", "channel_id"], kind="stable", ignore_index=True
     )
+
+
+def _slice_sorted_events(
+    frame: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp
+) -> pd.DataFrame:
+    """Берёт включительный календарный slice через binary search без full-frame mask."""
+    times = frame["observed_at"]
+    left = int(times.searchsorted(start, side="left"))
+    right = int(times.searchsorted(end, side="right"))
+    return frame.iloc[left:right]

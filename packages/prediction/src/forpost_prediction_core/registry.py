@@ -62,7 +62,7 @@ class ModelCard(ValidationEvidence):
     format_version: Literal[2]
     model_format: Literal["skops", "catboost_cbm", "lightgbm_text"]
     version: EvaluationVersion
-    feature_schema_version: EvidenceString
+    feature_schema_version: Literal["6"]
     evidence_tier: EvidenceTier
     calibrated: Annotated[bool, Field(strict=True)]
     created_at: AwareDatetime

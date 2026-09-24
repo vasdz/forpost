@@ -87,7 +87,7 @@ class ConfidenceInterval(ExactModel):
 
 class ValidationEvidence(ExactModel):
     task_semantics: TaskSemantics
-    feature_schema_version: EvidenceString | None
+    feature_schema_version: Literal["6"] | None
     config_sha256: Sha256 | None
     library_versions: dict[EvidenceString, EvidenceString]
     rolling_folds: tuple[FoldEvidence, ...]
