@@ -159,11 +159,12 @@ Skops и связь метрик экспорта с test-метриками. П
 Из корня репозитория, после установки локальных Python-зависимостей:
 
 ```powershell
-.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v4
+.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v6
 ```
 
-Для следующего материально изменённого эксперимента нужна новая версия `v5`,
-`v6` и далее. Подбор разрешён только по rolling validation. CLI возвращает 0
+`v5` использовалась только для development-only sweep и bundle не создала.
+После запуска указанной материальной попытки следующая версия — `v7`, `v8` и
+далее. Подбор разрешён только по rolling validation. CLI возвращает 0
 только после публикации и сохранения отчёта, иначе 1. Причины отказа фиксированы:
 `configuration_invalid`, `source_unavailable`, `dataset_unavailable`,
 `training_unavailable`, `validation_rejected` (rolling validation),
