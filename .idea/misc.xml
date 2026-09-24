@@ -3,5 +3,6 @@
   <component name="Black">
     <option name="sdkName" value="uv (forpost)" />
   </component>
+  <component name="KubernetesApiProvider"><![CDATA[{}]]></component>
   <component name="ProjectRootManager" version="2" project-jdk-name="uv (forpost)" project-jdk-type="Python SDK" />
 </project>
