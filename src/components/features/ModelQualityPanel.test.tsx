@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ModelQualityPanel } from './ModelQualityPanel';
 
@@ -6,12 +6,30 @@ const modelEvaluation = vi.hoisted(() => ({ fetchModelEvaluation: vi.fn() }));
 vi.mock('@/data/modelEvaluationClient', () => modelEvaluation);
 
 const publishedReport = {
-  formatVersion: 1 as const,
+  formatVersion: 2 as const,
   task: 'sensor_failure' as const,
   version: 'v12',
   status: 'published' as const,
   evidenceTier: 'proxy' as const,
-  labelStrategy: 'silence_horizon_proxy' as const,
+  labelStrategy: 'cadence_adjusted_silence_horizon_proxy_v2' as const,
+  taskSemantics: 'risk_of_unexpected_telemetry_silence_within_horizon' as const,
+  featureSchemaVersion: '6' as const,
+  configSha256: 'a'.repeat(64),
+  libraryVersions: { numpy: '2.3.3', pandas: '2.3.3', 'scikit-learn': '1.7.2', skops: '0.13.0', catboost: '1.2.8', lightgbm: '4.6.0' },
+  rollingFolds: [1, 2, 3].map((index) => ({
+    index, trainRows: 80 + index * 20, calibrationRows: 20, validationRows: index === 1 ? 14 : 13,
+    threshold: 0.6,
+    metrics: { precision: 0.8, recall: 0.7, f1: 0.75, prAuc: 0.81, rocAuc: 0.82, brierScore: 0.14, expectedCalibrationError: 0.06, alertRate: 0.16 },
+  })),
+  operatingProfiles: {
+    highPrecision: { threshold: 0.72, precision: 0.88, recall: 0.55, alertRate: 0.1 },
+    balanced: { threshold: 0.6, precision: 0.8, recall: 0.7, alertRate: 0.16 },
+    highRecall: { threshold: 0.42, precision: 0.72, recall: 0.86, alertRate: 0.25 },
+  },
+  validationConfidenceIntervals: Object.fromEntries(
+    ['precision', 'recall', 'f1', 'prAuc', 'rocAuc', 'brierScore', 'expectedCalibrationError', 'alertRate']
+      .map((key) => [key, { lower: 0.6, upper: 0.9, level: 0.95 as const, method: 'student_t_across_rolling_folds' as const }]),
+  ) as never,
   horizonHours: 48,
   createdAt: '2026-09-21T12:00:00+03:00',
   reasonCode: null,
@@ -61,6 +79,12 @@ describe('ModelQualityPanel', () => {
     expect(screen.getByText('48 ч')).toBeInTheDocument();
     expect(screen.getByText('120')).toBeInTheDocument();
     expect(screen.getByText(/отчёт об оценке не является прогнозом/i)).toBeInTheDocument();
+    expect(screen.getByRole('figure', { name: 'Сравнение качества модели' })).toBeInTheDocument();
+    const profileSelect = screen.getByRole('combobox', { name: 'Операционный профиль' });
+    expect(profileSelect).toHaveValue('balanced');
+    expect(screen.getByText(/16,0\s*%/)).toBeInTheDocument();
+    fireEvent.change(profileSelect, { target: { value: 'highRecall' } });
+    expect(screen.getByText(/25,0\s*%/)).toBeInTheDocument();
   });
 
   it('обозначает отклонённый отчёт как заблокированный релиз без прогноза и победителя', async () => {

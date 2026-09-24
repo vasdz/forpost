@@ -6,6 +6,7 @@ import pytest
 from forpost_domain.incidents.entities import (
     IncidentDecision,
     IncidentStatus,
+    PredictionDecisionRecord,
     ServiceRequestDraft,
 )
 from forpost_platform.operations.sqlite_repository import (
@@ -42,6 +43,12 @@ def test_repository_persists_idempotent_decision_after_reopen(tmp_path: Path):
     assert repeated == stored
     assert reopened.list_decisions("a" * 64) == [stored]
     assert reopened.verify_audit_chain()
+
+
+def test_repository_constructor_commits_migrations(tmp_path: Path):
+    repository = SqliteOperationsRepository(tmp_path / "operations.sqlite3")
+
+    assert not repository._connection.in_transaction  # noqa: SLF001
 
 
 def test_repository_rejects_idempotency_key_reuse_with_other_payload(tmp_path: Path):
@@ -96,6 +103,51 @@ def test_repository_persists_simulated_service_draft(tmp_path: Path):
     assert reopened.list_drafts() == [stored]
     assert stored.provenance == "simulated"
     assert reopened.verify_audit_chain()
+
+
+def test_repository_persists_latest_prediction_decision_after_reopen(tmp_path: Path):
+    path = tmp_path / "operations.sqlite3"
+    repository = SqliteOperationsRepository(path)
+    confirmed = repository.record_prediction_decision(
+        prediction_id="prediction-1",
+        decision="confirmed",
+        reason="Назначена проверка объекта",
+        actor_id="dispatcher-1",
+        created_at=NOW,
+    )
+    rejected = repository.record_prediction_decision(
+        prediction_id="prediction-1",
+        decision="rejected",
+        reason="Проверка не подтвердила риск",
+        actor_id="dispatcher-1",
+        created_at=NOW,
+    )
+    repository.close()
+
+    reopened = SqliteOperationsRepository(path)
+
+    assert isinstance(confirmed, PredictionDecisionRecord)
+    assert reopened.latest_prediction_decision("prediction-1", "dispatcher-1") == rejected
+
+
+def test_prediction_draft_is_idempotent_by_prediction_incident(tmp_path: Path):
+    repository = SqliteOperationsRepository(tmp_path / "operations.sqlite3")
+    draft = ServiceRequestDraft(
+        draft_id="draft-1",
+        incident_id="b" * 64,
+        target_id="channel-20",
+        category="prediction_follow_up",
+        priority="high",
+        recommended_action="Проверить канал и линию связи",
+        due_at=NOW,
+        author_id="dispatcher-1",
+        created_at=NOW,
+    )
+    duplicate = draft.model_copy(update={"draft_id": "draft-2"})
+
+    assert repository.create_prediction_draft(draft) == draft
+    assert repository.create_prediction_draft(duplicate) == draft
+    assert repository.list_drafts() == [draft]
 
 
 def test_audit_integrity_detects_persisted_record_tampering(tmp_path: Path):

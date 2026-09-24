@@ -62,12 +62,12 @@ describe('same-origin backend routes', () => {
     });
 
     const response = await postDecision(request, {
-      params: Promise.resolve({ predictionId: 'prediction/001' }),
+      params: Promise.resolve({ predictionId: 'prediction-001' }),
     });
 
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({
-      error: 'Доверенная пользовательская сессия не подключена',
+      error: 'Demo-сессия или CSRF-токен недействительны',
     });
     expect(backend.proxyForpostApi).not.toHaveBeenCalled();
   });
@@ -75,7 +75,12 @@ describe('same-origin backend routes', () => {
   it('отклоняет не-JSON решение до обращения к FastAPI', async () => {
     const request = new Request('http://127.0.0.1/api/predictions/id/decisions', {
       method: 'POST',
-      headers: { 'content-type': 'text/plain' },
+      headers: {
+        'content-type': 'text/plain',
+        origin: 'http://127.0.0.1',
+        cookie: `forpost_demo_session=${DEMO_ASSERTION}; forpost_csrf=${'c'.repeat(40)}`,
+        'x-forpost-csrf': 'c'.repeat(40),
+      },
       body: 'confirmed',
     });
 

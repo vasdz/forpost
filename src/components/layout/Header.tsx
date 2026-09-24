@@ -29,6 +29,7 @@ export function getSourceLabel(
 export function getPageName(pathname: string): string {
   switch (pathname) {
     case '/': return 'Обзор';
+    case '/notifications': return 'Уведомления';
     case '/sensor-failure': return 'Отказ датчика';
     case '/fire-risk': return 'Пожарный риск';
     case '/unauthorized-access': return 'Несанкционированный доступ';

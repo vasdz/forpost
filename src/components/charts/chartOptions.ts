@@ -5,9 +5,40 @@ const splitLine = 'var(--color-border)';
 const dataColor = 'var(--color-data)';
 const cyanColor = 'var(--color-cyan)';
 const dangerColor = 'var(--color-danger)';
+const successColor = 'var(--color-success)';
 const tooltip = { backgroundColor: 'var(--color-panel)', borderColor: splitLine, textStyle: { color: 'var(--color-text)' } };
 
 export type TimelinePoint = { at: string; value: number; lower?: number; upper?: number };
+
+export function buildModelQualityComparisonOption({
+  validation,
+  test,
+  minimums,
+}: {
+  validation: { precision: number; recall: number };
+  test: { precision: number; recall: number };
+  minimums: { precision: number; recall: number };
+}): EChartsOption {
+  return {
+    grid: { top: 42, right: 16, bottom: 38, left: 50 },
+    tooltip: { ...tooltip, trigger: 'axis', valueFormatter: (value) => `${(Number(value) * 100).toFixed(1)}%` },
+    legend: { top: 0, textStyle: { color: axisText } },
+    xAxis: {
+      type: 'category', data: ['Точность', 'Полнота'],
+      axisLabel: { color: axisText }, axisLine: { lineStyle: { color: splitLine } },
+    },
+    yAxis: {
+      type: 'value', min: 0, max: 1, interval: 0.25,
+      axisLabel: { color: axisText, formatter: (value: number) => `${Math.round(value * 100)}%` },
+      splitLine: { lineStyle: { color: splitLine } },
+    },
+    series: [
+      { name: 'Валидация', type: 'bar', data: [validation.precision, validation.recall], itemStyle: { color: dataColor } },
+      { name: 'Финальный тест', type: 'bar', data: [test.precision, test.recall], itemStyle: { color: successColor } },
+      { name: 'Минимум', type: 'line', data: [minimums.precision, minimums.recall], symbol: 'diamond', symbolSize: 10, lineStyle: { color: dangerColor, type: 'dashed' }, itemStyle: { color: dangerColor } },
+    ],
+  };
+}
 
 export function buildObservedActivityOption(
   buckets: Array<{ at: string; events: number; alarms: number }>,

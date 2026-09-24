@@ -3,8 +3,11 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { ModelQualityPanel } from './ModelQualityPanel';
 
 const report = {
-  format_version: 1, task: 'sensor_failure', version: 'v2', status: 'rejected',
-  evidence_tier: 'proxy', label_strategy: 'silence_horizon_proxy', horizon_hours: 72,
+  format_version: 2, task: 'sensor_failure', version: 'v2', status: 'rejected',
+  evidence_tier: 'proxy', label_strategy: 'cadence_adjusted_silence_horizon_proxy_v2', horizon_hours: 72,
+  task_semantics: 'risk_of_unexpected_telemetry_silence_within_horizon', feature_schema_version: null,
+  config_sha256: null, library_versions: {}, rolling_folds: [], operating_profiles: {},
+  validation_confidence_intervals: {},
   created_at: '2026-09-21T12:00:00Z', reason_code: 'validation_rejected',
   quality_thresholds: null, split_sizes: null, baseline_validation_pr_auc: null,
   validation_metrics: null, test_metrics: null, threshold: null, champion_name: null,

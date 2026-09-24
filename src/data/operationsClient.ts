@@ -1,6 +1,7 @@
 export type DemoProfile = 'district-dispatcher' | 'central-dispatcher' | 'technician' | 'admin';
 export type IncidentStatus = 'new' | 'in_review' | 'crew_dispatch' | 'false_alarm' | 'confirmed_incident' | 'closed';
 export type Priority = 'low' | 'medium' | 'high' | 'critical';
+export type PredictionDecision = 'confirmed' | 'rejected' | 'escalated';
 
 export type DemoSession = {
   active: true;
@@ -18,6 +19,12 @@ export type IncidentDecision = {
   createdAt: string;
   correctsDecisionId: string | null;
   provenance: 'simulated';
+};
+
+export type PredictionDecisionReceipt = {
+  status: 'recorded';
+  predictionId: string;
+  auditRecordId: number;
 };
 
 export type ServiceRequestDraft = {
@@ -134,6 +141,20 @@ function isIncidentDecision(value: unknown): value is IncidentDecision {
     && value.provenance === 'simulated';
 }
 
+function parsePredictionDecisionReceipt(
+  value: unknown,
+  predictionId: string,
+): PredictionDecisionReceipt | null {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['status', 'prediction_id', 'audit_record_id'])
+    || value.status !== 'recorded'
+    || value.prediction_id !== predictionId
+    || typeof value.audit_record_id !== 'number'
+    || !Number.isSafeInteger(value.audit_record_id)
+    || value.audit_record_id < 0) return null;
+  return { status: 'recorded', predictionId, auditRecordId: value.audit_record_id };
+}
+
 function isServiceDraft(value: unknown): value is ServiceRequestDraft {
   return isRecord(value)
     && hasExactKeys(value, ['draftId', 'incidentId', 'targetId', 'category', 'priority', 'recommendedAction', 'dueAt', 'authorId', 'createdAt', 'provenance'])
@@ -243,6 +264,24 @@ export async function recordIncidentDecision(
   return payload;
 }
 
+export async function recordPredictionDecision(
+  predictionId: string,
+  decision: { decision: PredictionDecision; reason: string },
+  csrfToken: string,
+  fetcher: Fetcher = globalThis.fetch,
+): Promise<PredictionDecisionReceipt> {
+  const response = await fetcher(`/api/predictions/${encodeURIComponent(predictionId)}/decisions`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-Forpost-CSRF': csrfToken },
+    body: JSON.stringify(decision),
+  });
+  const payload = await payloadOrError(response);
+  const receipt = parsePredictionDecisionReceipt(payload, predictionId);
+  if (receipt === null) throw new OperationsClientError('Некорректное подтверждение решения по прогнозу', 502);
+  return receipt;
+}
+
 export async function fetchIncidentDecisions(
   incidentId: string,
   fetcher: Fetcher = globalThis.fetch,
@@ -275,6 +314,27 @@ export async function createServiceDraft(
   });
   const payload = await payloadOrError(response);
   if (!isServiceDraft(payload)) throw new OperationsClientError('Некорректный ответ черновика', 502);
+  return payload;
+}
+
+export async function createPredictionServiceDraft(
+  predictionId: string,
+  csrfToken: string,
+  fetcher: Fetcher = globalThis.fetch,
+): Promise<ServiceRequestDraft> {
+  const response = await fetcher(
+    `/api/predictions/${encodeURIComponent(predictionId)}/service-request-drafts`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Forpost-CSRF': csrfToken },
+      body: JSON.stringify({}),
+    },
+  );
+  const payload = await payloadOrError(response);
+  if (!isServiceDraft(payload)) {
+    throw new OperationsClientError('Некорректный ответ черновика по прогнозу', 502);
+  }
   return payload;
 }
 

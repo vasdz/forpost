@@ -3,17 +3,25 @@
 import hashlib
 import json
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi import Path as ApiPath
 from fastapi.responses import JSONResponse
+from forpost_domain.incidents.entities import ServiceRequestDraft
 from forpost_platform.audit.ledger import AuditSeverity, audit_ledger
+from forpost_platform.operations.sqlite_repository import (
+    OperationsConflictError,
+    SqliteOperationsRepository,
+)
 from forpost_platform.security.identity import Permission, SecuritySubject
 from pydantic import ValidationError
 
 from forpost_api.dependencies import get_current_human_subject, require_permission
+from forpost_api.routes.v1.incidents import get_operations_repository
 from forpost_api.schemas.predictions import (
     MAX_PREDICTIONS_PER_RESPONSE,
     Prediction,
@@ -231,14 +239,33 @@ async def record_prediction_decision(
     request: PredictionDecisionRequest,
     subject: DecisionSubject,
     prediction_id: Annotated[str, ApiPath(min_length=1, max_length=128)],
+    repository: Annotated[SqliteOperationsRepository, Depends(get_operations_repository)],
 ) -> PredictionDecisionResponse:
     """Связывает решение диспетчера только с текущим валидным прогнозом."""
 
+    if not subject.has_permission(Permission.RECORD_DECISION):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Недостаточно прав")
+    if not subject.can_access_resource(district=None, complex_id=None):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Для прогноза не определена разрешённая область объекта",
+        )
     predictions, _ = load_exported_predictions()
-    if not any(item.id == prediction_id for item in predictions):
+    prediction = next((item for item in predictions if item.id == prediction_id), None)
+    if prediction is None or prediction.status in {"rejected", "resolved"}:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Прогноз не найден")
+    if prediction.predicted_at + timedelta(hours=prediction.horizon_hours) <= datetime.now(UTC):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Горизонт прогноза истёк")
 
-    record = audit_ledger.append(
+    created_at = datetime.now(UTC)
+    stored = repository.record_prediction_decision(
+        prediction_id=prediction_id,
+        decision=request.decision.value,
+        reason=request.reason,
+        actor_id=subject.user_id,
+        created_at=created_at,
+    )
+    audit_ledger.append(
         "PREDICTION_DECISION_RECORDED",
         AuditSeverity.WARNING,
         subject.user_id,
@@ -248,5 +275,60 @@ async def record_prediction_decision(
     return PredictionDecisionResponse(
         status="recorded",
         prediction_id=prediction_id,
-        audit_record_id=record.index,
+        audit_record_id=stored.sequence,
     )
+
+
+@router.post(
+    "/api/predictions/{prediction_id}/service-request-drafts",
+    response_model=ServiceRequestDraft,
+    response_model_by_alias=True,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_prediction_service_draft(
+    subject: DecisionSubject,
+    prediction_id: Annotated[str, ApiPath(min_length=1, max_length=128)],
+    repository: Annotated[SqliteOperationsRepository, Depends(get_operations_repository)],
+) -> ServiceRequestDraft:
+    """Создаёт simulated-черновик только из полей текущего проверенного прогноза."""
+
+    if not subject.has_permission(Permission.CREATE_SERVICE_DRAFT):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Недостаточно прав для создания черновика",
+        )
+    if not subject.can_access_resource(district=None, complex_id=None):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Для прогноза не определена разрешённая область объекта",
+        )
+
+    predictions, _ = load_exported_predictions()
+    prediction = next((item for item in predictions if item.id == prediction_id), None)
+    if prediction is None or prediction.status in {"rejected", "resolved"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Прогноз не найден")
+    if prediction.predicted_at + timedelta(hours=prediction.horizon_hours) <= datetime.now(UTC):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Горизонт прогноза истёк")
+    latest_decision = repository.latest_prediction_decision(prediction_id, subject.user_id)
+    if latest_decision is None or latest_decision.decision not in {"confirmed", "escalated"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Сначала подтвердите или эскалируйте прогноз",
+        )
+
+    incident_id = hashlib.sha256(f"forpost-prediction:{prediction.id}".encode()).hexdigest()
+    draft = ServiceRequestDraft(
+        draft_id=f"draft-{uuid4().hex}",
+        incident_id=incident_id,
+        target_id=prediction.entity_id,
+        category="prediction_follow_up",
+        priority=prediction.priority,
+        recommended_action=prediction.recommended_action,
+        due_at=prediction.predicted_at + timedelta(hours=prediction.horizon_hours),
+        author_id=subject.user_id,
+        created_at=datetime.now(UTC),
+    )
+    try:
+        return repository.create_prediction_draft(draft)
+    except OperationsConflictError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error

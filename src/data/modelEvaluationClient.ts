@@ -14,7 +14,11 @@ export type CandidateName =
   | 'hist_gradient_boosting_isotonic'
   | 'hist_gradient_boosting_sigmoid'
   | 'logistic_regression_isotonic'
-  | 'logistic_regression_sigmoid';
+  | 'logistic_regression_sigmoid'
+  | 'catboost_isotonic'
+  | 'catboost_sigmoid'
+  | 'lightgbm_isotonic'
+  | 'lightgbm_sigmoid';
 
 export type ModelMetrics = {
   precision: number;
@@ -38,13 +42,51 @@ export type QualityThresholds = {
 
 export type SplitSizes = { fit: number; calibration: number; validation: number; test: number };
 
+export type OperatingProfile = {
+  threshold: number;
+  precision: number;
+  recall: number;
+  alertRate: number;
+};
+
+export type ConfidenceInterval = {
+  lower: number;
+  upper: number;
+  level: 0.95;
+  method: 'student_t_across_rolling_folds';
+};
+
+export type RollingFold = {
+  index: number;
+  trainRows: number;
+  calibrationRows: number;
+  validationRows: number;
+  threshold: number;
+  metrics: ModelMetrics;
+};
+
+export type OperatingProfiles = {
+  highPrecision: OperatingProfile;
+  balanced: OperatingProfile;
+  highRecall: OperatingProfile;
+};
+
+export type ValidationConfidenceIntervals = Record<keyof ModelMetrics, ConfidenceInterval>;
+
 export type ModelEvaluation = {
-  formatVersion: 1;
+  formatVersion: 2;
   task: 'sensor_failure';
   version: string;
   status: EvaluationStatus;
   evidenceTier: 'proxy';
-  labelStrategy: 'silence_horizon_proxy';
+  labelStrategy: 'cadence_adjusted_silence_horizon_proxy_v2';
+  taskSemantics: 'risk_of_unexpected_telemetry_silence_within_horizon';
+  featureSchemaVersion: '6' | null;
+  configSha256: string | null;
+  libraryVersions: Record<string, string>;
+  rollingFolds: RollingFold[];
+  operatingProfiles: OperatingProfiles | null;
+  validationConfidenceIntervals: ValidationConfidenceIntervals | null;
   horizonHours: number | null;
   createdAt: string;
   reasonCode: EvaluationReasonCode | null;
@@ -65,9 +107,14 @@ export type ModelEvaluationFeed =
 const metricKeys = ['precision', 'recall', 'f1', 'pr_auc', 'roc_auc', 'brier_score', 'expected_calibration_error', 'alert_rate'] as const;
 const thresholdKeys = ['minimum_precision', 'minimum_recall', 'maximum_alert_rate', 'maximum_expected_calibration_error', 'maximum_brier_score', 'minimum_baseline_pr_auc_delta'] as const;
 const splitKeys = ['fit', 'calibration', 'validation', 'test'] as const;
-const reportKeys = ['format_version', 'task', 'version', 'status', 'evidence_tier', 'label_strategy', 'horizon_hours', 'created_at', 'reason_code', 'quality_thresholds', 'split_sizes', 'baseline_validation_pr_auc', 'validation_metrics', 'test_metrics', 'threshold', 'champion_name'] as const;
+const foldKeys = ['index', 'train_rows', 'calibration_rows', 'validation_rows', 'threshold', 'metrics'] as const;
+const profileKeys = ['threshold', 'precision', 'recall', 'alert_rate'] as const;
+const profileNames = ['high_precision', 'balanced', 'high_recall'] as const;
+const confidenceKeys = ['lower', 'upper', 'level', 'method'] as const;
+const libraryNames = ['numpy', 'pandas', 'scikit-learn', 'skops', 'catboost', 'lightgbm'] as const;
+const reportKeys = ['format_version', 'task', 'version', 'status', 'evidence_tier', 'label_strategy', 'task_semantics', 'feature_schema_version', 'config_sha256', 'library_versions', 'rolling_folds', 'operating_profiles', 'validation_confidence_intervals', 'horizon_hours', 'created_at', 'reason_code', 'quality_thresholds', 'split_sizes', 'baseline_validation_pr_auc', 'validation_metrics', 'test_metrics', 'threshold', 'champion_name'] as const;
 const reasonCodes: readonly EvaluationReasonCode[] = ['configuration_invalid', 'source_unavailable', 'dataset_unavailable', 'training_unavailable', 'validation_rejected', 'test_rejected', 'inference_unavailable', 'release_unavailable'];
-const candidates: readonly CandidateName[] = ['extra_trees_isotonic', 'extra_trees_sigmoid', 'hist_gradient_boosting_isotonic', 'hist_gradient_boosting_sigmoid', 'logistic_regression_isotonic', 'logistic_regression_sigmoid'];
+const candidates: readonly CandidateName[] = ['extra_trees_isotonic', 'extra_trees_sigmoid', 'hist_gradient_boosting_isotonic', 'hist_gradient_boosting_sigmoid', 'logistic_regression_isotonic', 'logistic_regression_sigmoid', 'catboost_isotonic', 'catboost_sigmoid', 'lightgbm_isotonic', 'lightgbm_sigmoid'];
 
 export async function fetchModelEvaluation(
   fetcher: typeof globalThis.fetch = globalThis.fetch,
@@ -89,12 +136,19 @@ function unavailableFeed(): ModelEvaluationFeed {
 
 function parseModelEvaluation(value: unknown): ModelEvaluation | null {
   if (!isExactRecord(value, reportKeys)
-    || value.format_version !== 1
+    || value.format_version !== 2
     || value.task !== 'sensor_failure'
     || !isVersion(value.version)
     || !isEvaluationStatus(value.status)
     || value.evidence_tier !== 'proxy'
-    || value.label_strategy !== 'silence_horizon_proxy'
+    || value.label_strategy !== 'cadence_adjusted_silence_horizon_proxy_v2'
+    || value.task_semantics !== 'risk_of_unexpected_telemetry_silence_within_horizon'
+    || (value.feature_schema_version !== null && value.feature_schema_version !== '6')
+    || !isSha256OrNull(value.config_sha256)
+    || !isLibraryVersions(value.library_versions)
+    || !isRollingFolds(value.rolling_folds)
+    || !isOperatingProfiles(value.operating_profiles)
+    || !isConfidenceIntervals(value.validation_confidence_intervals)
     || !isHorizonOrNull(value.horizon_hours)
     || !isTimestampWithTimezone(value.created_at)
     || !isReasonCodeOrNull(value.reason_code)
@@ -106,16 +160,24 @@ function parseModelEvaluation(value: unknown): ModelEvaluation | null {
     || !isThresholdOrNull(value.threshold)
     || !isCandidateOrNull(value.champion_name)) return null;
 
-  if (value.status === 'published' && (!allEvidencePresent(value) || value.reason_code !== null)) return null;
+  if (value.status === 'published' && (!allEvidencePresent(value) || value.reason_code !== null
+    || !isCompleteValidationEvidence(value))) return null;
   if (value.status === 'rejected' && (value.reason_code === null || value.test_metrics !== null)) return null;
 
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     task: 'sensor_failure',
     version: value.version,
     status: value.status,
     evidenceTier: 'proxy',
-    labelStrategy: 'silence_horizon_proxy',
+    labelStrategy: 'cadence_adjusted_silence_horizon_proxy_v2',
+    taskSemantics: 'risk_of_unexpected_telemetry_silence_within_horizon',
+    featureSchemaVersion: value.feature_schema_version,
+    configSha256: value.config_sha256,
+    libraryVersions: value.library_versions,
+    rollingFolds: mapRollingFolds(value.rolling_folds),
+    operatingProfiles: mapOperatingProfiles(value.operating_profiles),
+    validationConfidenceIntervals: mapConfidenceIntervals(value.validation_confidence_intervals),
     horizonHours: value.horizon_hours,
     createdAt: value.created_at,
     reasonCode: value.reason_code,
@@ -130,7 +192,9 @@ function parseModelEvaluation(value: unknown): ModelEvaluation | null {
 }
 
 function allEvidencePresent(value: Record<string, unknown>): boolean {
-  return value.quality_thresholds !== null
+  return value.feature_schema_version !== null
+    && value.config_sha256 !== null
+    && value.quality_thresholds !== null
     && value.horizon_hours !== null
     && value.split_sizes !== null
     && value.baseline_validation_pr_auc !== null
@@ -138,6 +202,60 @@ function allEvidencePresent(value: Record<string, unknown>): boolean {
     && value.test_metrics !== null
     && value.threshold !== null
     && value.champion_name !== null;
+}
+
+function isCompleteValidationEvidence(value: Record<string, unknown>): boolean {
+  if (!isExactRecord(value.library_versions, libraryNames)
+    || !Array.isArray(value.rolling_folds) || value.rolling_folds.length < 3
+    || !isExactRecord(value.operating_profiles, profileNames)
+    || !isExactRecord(value.validation_confidence_intervals, metricKeys)
+    || !isExactRecord(value.split_sizes, splitKeys)
+    || typeof value.threshold !== 'number') return false;
+  const folds = value.rolling_folds as Array<Record<string, unknown>>;
+  const balanced = (value.operating_profiles as Record<string, Record<string, unknown>>).balanced;
+  return folds.every((fold, index) => fold.index === index + 1 && fold.threshold === value.threshold)
+    && folds.reduce((sum, fold) => sum + Number(fold.validation_rows), 0) === value.split_sizes.validation
+    && balanced.threshold === value.threshold;
+}
+
+function mapRollingFolds(value: unknown): RollingFold[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((fold) => ({
+    index: fold.index,
+    trainRows: fold.train_rows,
+    calibrationRows: fold.calibration_rows,
+    validationRows: fold.validation_rows,
+    threshold: fold.threshold,
+    metrics: mapMetrics(fold.metrics) as ModelMetrics,
+  }));
+}
+
+function mapOperatingProfiles(value: unknown): OperatingProfiles | null {
+  if (!isExactRecord(value, profileNames)) return null;
+  return {
+    highPrecision: mapOperatingProfile(value.high_precision),
+    balanced: mapOperatingProfile(value.balanced),
+    highRecall: mapOperatingProfile(value.high_recall),
+  };
+}
+
+function mapOperatingProfile(value: unknown): OperatingProfile {
+  const profile = value as Record<string, number>;
+  return { threshold: profile.threshold, precision: profile.precision, recall: profile.recall, alertRate: profile.alert_rate };
+}
+
+function mapConfidenceIntervals(value: unknown): ValidationConfidenceIntervals | null {
+  if (!isExactRecord(value, metricKeys)) return null;
+  return {
+    precision: value.precision as ConfidenceInterval,
+    recall: value.recall as ConfidenceInterval,
+    f1: value.f1 as ConfidenceInterval,
+    prAuc: value.pr_auc as ConfidenceInterval,
+    rocAuc: value.roc_auc as ConfidenceInterval,
+    brierScore: value.brier_score as ConfidenceInterval,
+    expectedCalibrationError: value.expected_calibration_error as ConfidenceInterval,
+    alertRate: value.alert_rate as ConfidenceInterval,
+  };
 }
 
 function mapMetrics(value: Record<string, number> | null): ModelMetrics | null {
@@ -181,6 +299,43 @@ function isMetricsOrNull(value: unknown): value is Record<string, number> | null
     && isUnitNumber(value.expected_calibration_error) && isUnitNumber(value.alert_rate));
 }
 
+function isSha256OrNull(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && /^[a-f0-9]{64}$/.test(value));
+}
+
+function isLibraryVersions(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.entries(value).every(([name, version]) => name.length > 0
+    && name.length <= 128 && typeof version === 'string' && version.length > 0 && version.length <= 128);
+}
+
+function isRollingFolds(value: unknown): value is Array<Record<string, unknown>> {
+  return Array.isArray(value) && value.length <= 20 && value.every((fold) => isExactRecord(fold, foldKeys)
+    && isBoundedPositiveInteger(fold.index, 20)
+    && isPositiveSafeInteger(fold.train_rows)
+    && isPositiveSafeInteger(fold.calibration_rows)
+    && isPositiveSafeInteger(fold.validation_rows)
+    && isUnitNumber(fold.threshold)
+    && isMetricsOrNull(fold.metrics) && fold.metrics !== null);
+}
+
+function isOperatingProfiles(value: unknown): value is Record<string, Record<string, number>> {
+  return isRecord(value) && Object.keys(value).every((key) => profileNames.includes(key as typeof profileNames[number]))
+    && Object.values(value).every((profile) => isExactRecord(profile, profileKeys)
+      && isUnitNumber(profile.threshold) && isUnitNumber(profile.precision)
+      && isUnitNumber(profile.recall) && isUnitNumber(profile.alert_rate));
+}
+
+function isConfidenceIntervals(value: unknown): value is Record<string, ConfidenceInterval> {
+  return isRecord(value) && Object.keys(value).every((key) => metricKeys.includes(key as typeof metricKeys[number]))
+    && Object.values(value).every((interval) => isExactRecord(interval, confidenceKeys)
+      && isUnitNumber(interval.lower) && isUnitNumber(interval.upper) && interval.lower <= interval.upper
+      && interval.level === 0.95 && interval.method === 'student_t_across_rolling_folds');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function isQualityThresholdsOrNull(value: unknown): value is Record<string, number> | null {
   return value === null || (isExactRecord(value, thresholdKeys)
     && isUnitNumber(value.minimum_precision) && isUnitNumber(value.minimum_recall)
@@ -196,6 +351,10 @@ function isSplitSizesOrNull(value: unknown): value is SplitSizes | null {
 
 function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function isBoundedPositiveInteger(value: unknown, maximum: number): value is number {
+  return isPositiveSafeInteger(value) && value <= maximum;
 }
 
 function isHorizonOrNull(value: unknown): value is number | null {

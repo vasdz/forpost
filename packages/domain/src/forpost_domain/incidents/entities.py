@@ -32,6 +32,20 @@ class IncidentDecision(BaseModel):
     provenance: Literal["simulated"] = "simulated"
 
 
+class PredictionDecisionRecord(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid", frozen=True
+    )
+
+    sequence: int = Field(ge=1)
+    prediction_id: str = Field(min_length=1, max_length=128)
+    decision: Literal["confirmed", "rejected", "escalated"]
+    reason: str = Field(min_length=3, max_length=1000)
+    actor_id: str = Field(min_length=1, max_length=128)
+    created_at: datetime
+    provenance: Literal["simulated"] = "simulated"
+
+
 class ServiceRequestDraft(BaseModel):
     model_config = ConfigDict(
         alias_generator=to_camel, populate_by_name=True, extra="forbid", frozen=True

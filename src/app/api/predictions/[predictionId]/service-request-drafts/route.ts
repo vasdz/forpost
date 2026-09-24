@@ -4,21 +4,10 @@ import { readDemoMutationContext } from '@/server/demoSession';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-type RouteContext = {
-  params: Promise<{ predictionId: string }>;
-};
+type RouteContext = { params: Promise<{ predictionId: string }> };
 
 function errorResponse(status: number, error: string): Response {
-  return Response.json(
-    { error },
-    {
-      status,
-      headers: {
-        'Cache-Control': 'no-store, no-cache, must-revalidate, private',
-        'X-Content-Type-Options': 'nosniff',
-      },
-    },
-  );
+  return Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 }
 
 export async function POST(request: Request, context: RouteContext): Promise<Response> {
@@ -27,27 +16,21 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
     return errorResponse(404, 'Прогноз не найден');
   }
   const session = readDemoMutationContext(request);
-  if (session === null) {
-    return errorResponse(403, 'Demo-сессия или CSRF-токен недействительны');
-  }
+  if (session === null) return errorResponse(403, 'Demo-сессия или CSRF-токен недействительны');
   if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) {
     return errorResponse(415, 'Ожидается application/json');
   }
   const body = await request.text();
-  if (body.length > 2_048) return errorResponse(413, 'Тело запроса слишком велико');
+  if (body.length > 1_024) return errorResponse(413, 'Тело запроса слишком велико');
   try {
     const payload: unknown = JSON.parse(body);
     if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) throw new Error();
     const record = payload as Record<string, unknown>;
-    if (Object.keys(record).sort().join(',') !== 'decision,reason'
-      || !['confirmed', 'rejected', 'escalated'].includes(String(record.decision))
-      || typeof record.reason !== 'string'
-      || record.reason.trim().length < 3
-      || record.reason.length > 1_000) throw new Error();
+    if (Object.keys(record).length !== 0) throw new Error();
   } catch {
-    return errorResponse(422, 'Недопустимое решение по прогнозу');
+    return errorResponse(422, 'Тело запроса должно быть пустым объектом');
   }
-  return proxyForpostApi(`/api/predictions/${predictionId}/decisions`, {
+  return proxyForpostApi(`/api/predictions/${predictionId}/service-request-drafts`, {
     method: 'POST', body, credential: session.credential,
   });
 }

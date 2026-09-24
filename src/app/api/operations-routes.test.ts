@@ -9,6 +9,8 @@ vi.mock('@/server/forpostApi', () => backend);
 
 import { POST as createDemoSession } from './demo-session/route';
 import { POST as recordDecision } from './incidents/[incidentId]/decisions/route';
+import { POST as recordPredictionDecision } from './predictions/[predictionId]/decisions/route';
+import { POST as createPredictionDraft } from './predictions/[predictionId]/service-request-drafts/route';
 
 const INCIDENT_ID = 'a'.repeat(64);
 const ASSERTION = `demo.${'x'.repeat(40)}.${'y'.repeat(40)}`;
@@ -112,6 +114,72 @@ describe('операционные BFF-маршруты', () => {
         credential: assertion,
         idempotencyKey: 'decision-command-1',
       }),
+    );
+  });
+
+  it('проксирует решение по текущему прогнозу только с demo-личностью и CSRF', async () => {
+    backend.proxyForpostApi.mockResolvedValue(Response.json({
+      status: 'recorded', prediction_id: 'prediction-1', audit_record_id: 7,
+    }, { status: 201 }));
+    const request = new Request('http://127.0.0.1/api/predictions/prediction-1/decisions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json', origin: 'http://127.0.0.1',
+        cookie: `forpost_demo_session=${ASSERTION}; forpost_csrf=${'c'.repeat(40)}`,
+        'x-forpost-csrf': 'c'.repeat(40),
+      },
+      body: JSON.stringify({ decision: 'confirmed', reason: 'Назначена проверка объекта' }),
+    });
+
+    const response = await recordPredictionDecision(request, {
+      params: Promise.resolve({ predictionId: 'prediction-1' }),
+    });
+
+    expect(response.status).toBe(201);
+    expect(backend.proxyForpostApi).toHaveBeenCalledWith(
+      '/api/predictions/prediction-1/decisions',
+      expect.objectContaining({ method: 'POST', credential: ASSERTION }),
+    );
+  });
+
+  it('не проксирует решение по прогнозу с чужим origin или лишним полем', async () => {
+    const request = new Request('http://127.0.0.1/api/predictions/prediction-1/decisions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json', origin: 'https://evil.invalid',
+        cookie: `forpost_demo_session=${ASSERTION}; forpost_csrf=${'c'.repeat(40)}`,
+        'x-forpost-csrf': 'c'.repeat(40),
+      },
+      body: JSON.stringify({ decision: 'confirmed', reason: 'Назначена проверка объекта', role: 'admin' }),
+    });
+
+    const response = await recordPredictionDecision(request, {
+      params: Promise.resolve({ predictionId: 'prediction-1' }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(backend.proxyForpostApi).not.toHaveBeenCalled();
+  });
+
+  it('проксирует минимальный черновик по прогнозу без доверия к данным UI', async () => {
+    const request = new Request('http://127.0.0.1/api/predictions/prediction-1/service-request-drafts', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json', origin: 'http://127.0.0.1',
+        cookie: `forpost_demo_session=${ASSERTION}; forpost_csrf=${'c'.repeat(40)}`,
+        'x-forpost-csrf': 'c'.repeat(40),
+      },
+      body: JSON.stringify({}),
+    });
+
+    const response = await createPredictionDraft(request, {
+      params: Promise.resolve({ predictionId: 'prediction-1' }),
+    });
+
+    expect(response.status).toBe(201);
+    expect(backend.proxyForpostApi).toHaveBeenCalledWith(
+      '/api/predictions/prediction-1/service-request-drafts',
+      expect.objectContaining({ method: 'POST', credential: ASSERTION }),
     );
   });
 });

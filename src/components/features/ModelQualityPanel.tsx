@@ -1,10 +1,12 @@
 'use client';
 
 import { useEffect, useId, useRef, useState } from 'react';
+import { ModelQualityComparisonChart } from '@/components/charts/ModelQualityComparisonChart';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
-import { fetchModelEvaluation, type ModelEvaluation, type ModelEvaluationFeed, type ModelMetrics, type QualityThresholds, type SplitSizes } from '@/data/modelEvaluationClient';
+import { Select } from '@/components/ui/Select';
+import { fetchModelEvaluation, type ConfidenceInterval, type ModelEvaluation, type ModelEvaluationFeed, type ModelMetrics, type OperatingProfile, type OperatingProfiles, type QualityThresholds, type SplitSizes, type ValidationConfidenceIntervals } from '@/data/modelEvaluationClient';
 import { startDemoSession } from '@/data/operationsClient';
 
 const reasonLabels = {
@@ -69,6 +71,7 @@ export function ModelQualityPanel() {
 }
 
 function EvaluationDetails({ evaluation }: { evaluation: ModelEvaluation }) {
+  const [profileName, setProfileName] = useState<keyof OperatingProfiles>('balanced');
   const rejected = evaluation.status === 'rejected';
   return <section aria-labelledby="model-quality-title" className="mt-6 space-y-4">
     <Card>
@@ -89,6 +92,8 @@ function EvaluationDetails({ evaluation }: { evaluation: ModelEvaluation }) {
         <Detail label="Горизонт оценки" value={evaluation.horizonHours === null ? 'Не определён' : `${evaluation.horizonHours} ч`} telemetry />
         <Detail label="Время отчёта" value={formatDate(evaluation.createdAt)} />
         <Detail label="Базовый PR-AUC валидации" value={formatNumber(evaluation.baselineValidationPrAuc)} telemetry />
+        <Detail label="Схема признаков" value={evaluation.featureSchemaVersion === null ? 'Не определена' : `v${evaluation.featureSchemaVersion}`} telemetry />
+        <Detail label="Rolling-folds" value={String(evaluation.rollingFolds.length)} telemetry />
       </dl>
     </Card>
     {rejected && <Card aria-live="polite" className="border-[var(--color-status-high)]"><h3 className="font-heading text-lg font-semibold">Релиз модели заблокирован</h3><p className="mt-2 text-sm leading-6 text-[var(--color-text-muted)]">Отчёт фиксирует доказательство блокировки релиза и не подтверждает доступность прогноза.</p><p className="mt-3 text-sm"><span className="text-[var(--color-text-muted)]">Причина: </span><strong>{evaluation.reasonCode === null ? 'Не указана' : reasonLabels[evaluation.reasonCode]}</strong></p></Card>}
@@ -96,12 +101,49 @@ function EvaluationDetails({ evaluation }: { evaluation: ModelEvaluation }) {
       <ThresholdCard thresholds={evaluation.qualityThresholds} />
       <SplitSizesCard splitSizes={evaluation.splitSizes} />
     </div>
+    {evaluation.validationMetrics !== null && evaluation.testMetrics !== null && evaluation.qualityThresholds !== null && <Card>
+      <div className="mb-4"><h3 className="font-heading text-lg font-semibold">Проверка на отложенных данных</h3><p className="mt-1 text-sm leading-6 text-[var(--color-text-muted)]">Диаграмма отражает сравнение прогнозных классов с фактическими метками отдельно на временной валидации и финальном тесте.</p></div>
+      <ModelQualityComparisonChart validation={evaluation.validationMetrics} test={evaluation.testMetrics} thresholds={evaluation.qualityThresholds} />
+    </Card>}
+    {evaluation.operatingProfiles !== null && <OperatingProfileCard profiles={evaluation.operatingProfiles} selected={profileName} onSelect={setProfileName} />}
     <Card>
       <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 className="font-heading text-lg font-semibold">Метрики качества</h3><p className="mt-1 text-sm text-[var(--color-text-muted)]">Валидация и тест отображаются раздельно; тест отсутствует для отклонённого отчёта.</p></div><p className="font-telemetry text-sm text-[var(--color-text-muted)]">Порог: {formatNumber(evaluation.threshold)}</p></div>
-      <div className="data-table-frame mt-4 overflow-auto"><table aria-label="Метрики качества модели" className="w-full min-w-[560px] border-collapse text-left text-sm"><caption className="sr-only">Метрики качества модели для валидационной и тестовой выборок</caption><thead className="bg-[var(--color-panel-2)]"><tr><th scope="col" className="border-b border-[var(--color-border)] px-4 py-3 text-xs font-semibold">Метрика</th><th scope="col" className="border-b border-[var(--color-border)] px-4 py-3 text-xs font-semibold">Валидация</th><th scope="col" className="border-b border-[var(--color-border)] px-4 py-3 text-xs font-semibold">Тест</th></tr></thead><tbody>{metricRows.map(({ key, label, value }) => <tr key={key} className="border-b border-[var(--color-border)] last:border-0"><th scope="row" className="px-4 py-3 font-medium">{label}</th><td className="px-4 py-3 font-telemetry">{formatNumber(value(evaluation.validationMetrics))}</td><td className="px-4 py-3 font-telemetry">{formatNumber(value(evaluation.testMetrics))}</td></tr>)}</tbody></table></div>
+      <div className="data-table-frame mt-4 overflow-auto"><table aria-label="Метрики качества модели" className="w-full min-w-[700px] border-collapse text-left text-sm"><caption className="sr-only">Метрики качества модели для валидационной и тестовой выборок</caption><thead className="bg-[var(--color-panel-2)]"><tr><th scope="col" className="border-b border-[var(--color-border)] px-4 py-3 text-xs font-semibold">Метрика</th><th scope="col" className="border-b border-[var(--color-border)] px-4 py-3 text-xs font-semibold">Валидация</th><th scope="col" className="border-b border-[var(--color-border)] px-4 py-3 text-xs font-semibold">95% интервал</th><th scope="col" className="border-b border-[var(--color-border)] px-4 py-3 text-xs font-semibold">Тест</th></tr></thead><tbody>{metricRows.map(({ key, label, value }) => <tr key={key} className="border-b border-[var(--color-border)] last:border-0"><th scope="row" className="px-4 py-3 font-medium">{label}</th><td className="px-4 py-3 font-telemetry">{formatNumber(value(evaluation.validationMetrics))}</td><td className="px-4 py-3 font-telemetry">{formatInterval(getConfidenceInterval(evaluation.validationConfidenceIntervals, key))}</td><td className="px-4 py-3 font-telemetry">{formatNumber(value(evaluation.testMetrics))}</td></tr>)}</tbody></table></div>
       <p className="mt-4 text-sm text-[var(--color-text-muted)]">Победитель валидации: <span className="font-telemetry text-[var(--color-text)]">{evaluation.championName ?? 'Не определён'}</span></p>
     </Card>
   </section>;
+}
+
+const profileOptions = [
+  { value: 'highPrecision', label: 'Максимум точности' },
+  { value: 'balanced', label: 'Сбалансированный' },
+  { value: 'highRecall', label: 'Максимум полноты' },
+];
+
+function OperatingProfileCard({ profiles, selected, onSelect }: {
+  profiles: OperatingProfiles;
+  selected: keyof OperatingProfiles;
+  onSelect: (profile: keyof OperatingProfiles) => void;
+}) {
+  const profile: OperatingProfile = getOperatingProfile(profiles, selected);
+  return <Card>
+    <div className="flex flex-wrap items-end justify-between gap-4">
+      <div><h3 className="font-heading text-lg font-semibold">Операционный сценарий</h3><p className="mt-1 max-w-3xl text-sm leading-6 text-[var(--color-text-muted)]">Настраиваемое сравнение профилей, рассчитанных только на validation. Выбор не изменяет опубликованный рабочий порог и не запускает модель.</p></div>
+      <Select label="Операционный профиль" options={profileOptions} value={selected} onChange={(event) => onSelect(event.target.value as keyof OperatingProfiles)} />
+    </div>
+    <dl className="mt-5 grid gap-4 border-t border-[var(--color-border)] pt-5 sm:grid-cols-2 lg:grid-cols-4" aria-live="polite">
+      <Detail label="Порог решения" value={formatNumber(profile.threshold)} telemetry />
+      <Detail label="Точность" value={formatPercent(profile.precision)} telemetry />
+      <Detail label="Полнота" value={formatPercent(profile.recall)} telemetry />
+      <Detail label="Ожидаемая доля алертов" value={formatPercent(profile.alertRate)} telemetry />
+    </dl>
+  </Card>;
+}
+
+function getOperatingProfile(profiles: OperatingProfiles, selected: keyof OperatingProfiles): OperatingProfile {
+  if (selected === 'highPrecision') return profiles.highPrecision;
+  if (selected === 'highRecall') return profiles.highRecall;
+  return profiles.balanced;
 }
 
 function ThresholdCard({ thresholds }: { thresholds: QualityThresholds | null }) {
@@ -124,6 +166,31 @@ function Detail({ label, value, telemetry = false }: { label: string; value: str
 
 function formatNumber(value: number | null): string {
   return value === null ? '—' : value.toLocaleString('ru-RU', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+}
+
+function formatPercent(value: number): string {
+  return value.toLocaleString('ru-RU', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 });
+}
+
+function formatInterval(value: ConfidenceInterval | null): string {
+  return value === null ? '—' : `${formatNumber(value.lower)}–${formatNumber(value.upper)}`;
+}
+
+function getConfidenceInterval(
+  intervals: ValidationConfidenceIntervals | null,
+  metric: keyof ModelMetrics,
+): ConfidenceInterval | null {
+  if (intervals === null) return null;
+  switch (metric) {
+    case 'precision': return intervals.precision;
+    case 'recall': return intervals.recall;
+    case 'f1': return intervals.f1;
+    case 'prAuc': return intervals.prAuc;
+    case 'rocAuc': return intervals.rocAuc;
+    case 'brierScore': return intervals.brierScore;
+    case 'expectedCalibrationError': return intervals.expectedCalibrationError;
+    case 'alertRate': return intervals.alertRate;
+  }
 }
 
 function formatDate(value: string): string {

@@ -11,7 +11,9 @@ from fastapi.testclient import TestClient
 from forpost_api.dependencies import get_current_human_subject, get_current_subject
 from forpost_api.main import app
 from forpost_api.routes import predictions
+from forpost_api.routes.v1.incidents import get_operations_repository
 from forpost_platform.audit.ledger import audit_ledger
+from forpost_platform.operations.sqlite_repository import SqliteOperationsRepository
 from forpost_platform.security.identity import Role, SecuritySubject
 
 
@@ -94,21 +96,23 @@ def test_default_models_path_serves_exports_from_repository_root(tmp_path):
 
 
 @pytest.fixture
-def client():
+def client(tmp_path):
     """Подключает доверенного диспетчера без внешнего поставщика идентификации."""
 
     subject = SecuritySubject(
         user_id="test-dispatcher",
         username="test-dispatcher",
-        roles=frozenset({Role.DISTRICT_DISPATCHER}),
-        allowed_districts=frozenset({"rek-1"}),
+        roles=frozenset({Role.CENTRAL_DISPATCHER}),
     )
+    repository = SqliteOperationsRepository(tmp_path / "operations.sqlite3")
     app.dependency_overrides[get_current_subject] = lambda: subject
     app.dependency_overrides[get_current_human_subject] = lambda: subject
+    app.dependency_overrides[get_operations_repository] = lambda: repository
     try:
         with TestClient(app) as test_client:
             yield test_client
     finally:
+        repository.close()
         app.dependency_overrides.clear()
 
 
@@ -301,7 +305,11 @@ def test_predictions_endpoint_accepts_missing_individual_confidence_interval(
 def test_dispatcher_decision_is_written_to_audit_ledger(client: TestClient, tmp_path, monkeypatch):
     """Решение и причина должны сохраняться для последующего аудита."""
 
-    write_prediction_export(tmp_path, "sensor_failure", "v1", prediction_json("prediction-001"))
+    content = prediction_json("prediction-001").replace(
+        '"predicted_at": "2026-09-15T18:00:00+03:00"',
+        '"predicted_at": "2099-09-15T18:00:00+03:00"',
+    )
+    write_prediction_export(tmp_path, "sensor_failure", "v1", content)
     monkeypatch.setattr(predictions, "ML_MODELS_DIRECTORY", tmp_path, raising=False)
 
     response = client.post(
@@ -332,6 +340,123 @@ def test_decision_for_unknown_prediction_is_rejected(client: TestClient, tmp_pat
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Прогноз не найден"}
+
+
+def test_technician_cannot_record_prediction_decision(client: TestClient, tmp_path, monkeypatch):
+    write_prediction_export(tmp_path, "sensor_failure", "v1", prediction_json("prediction-001"))
+    monkeypatch.setattr(predictions, "ML_MODELS_DIRECTORY", tmp_path, raising=False)
+    technician = SecuritySubject(
+        user_id="technician-1",
+        username="technician-1",
+        roles=frozenset({Role.TECHNICIAN}),
+    )
+    app.dependency_overrides[get_current_human_subject] = lambda: technician
+
+    response = client.post(
+        "/api/predictions/prediction-001/decisions",
+        json={"decision": "confirmed", "reason": "Назначена проверка объекта"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_central_dispatcher_creates_draft_derived_from_current_prediction(
+    client: TestClient, tmp_path, monkeypatch
+):
+    """Поля заявки выводятся сервером из проверенного экспорта, а не принимаются от UI."""
+
+    content = prediction_json("prediction-001").replace(
+        '"predicted_at": "2026-09-15T18:00:00+03:00"',
+        '"predicted_at": "2099-09-15T18:00:00+03:00"',
+    )
+    write_prediction_export(tmp_path, "sensor_failure", "v1", content)
+    monkeypatch.setattr(predictions, "ML_MODELS_DIRECTORY", tmp_path, raising=False)
+    decision = client.post(
+        "/api/predictions/prediction-001/decisions",
+        json={"decision": "confirmed", "reason": "Назначена проверка объекта"},
+    )
+    response = client.post(
+        "/api/predictions/prediction-001/service-request-drafts",
+        json={},
+    )
+
+    assert decision.status_code == 201
+    assert response.status_code == 201
+    assert response.json() == {
+        "draftId": response.json()["draftId"],
+        "incidentId": hashlib.sha256(b"forpost-prediction:prediction-001").hexdigest(),
+        "targetId": "sensor-001",
+        "category": "prediction_follow_up",
+        "priority": "high",
+        "recommendedAction": "Проверить датчик",
+        "dueAt": "2099-09-16T18:00:00+03:00",
+        "authorId": "test-dispatcher",
+        "createdAt": response.json()["createdAt"],
+        "provenance": "simulated",
+    }
+
+
+def test_prediction_draft_requires_prior_actionable_decision(
+    client: TestClient, tmp_path, monkeypatch
+):
+    content = prediction_json("prediction-002").replace(
+        '"predicted_at": "2026-09-15T18:00:00+03:00"',
+        '"predicted_at": "2099-09-15T18:00:00+03:00"',
+    )
+    write_prediction_export(tmp_path, "sensor_failure", "v1", content)
+    monkeypatch.setattr(predictions, "ML_MODELS_DIRECTORY", tmp_path, raising=False)
+    response = client.post(
+        "/api/predictions/prediction-002/service-request-drafts",
+        json={},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Сначала подтвердите или эскалируйте прогноз"}
+
+
+def test_expired_prediction_cannot_create_draft(client: TestClient, tmp_path, monkeypatch):
+    write_prediction_export(tmp_path, "sensor_failure", "v1", prediction_json("expired"))
+    monkeypatch.setattr(predictions, "ML_MODELS_DIRECTORY", tmp_path, raising=False)
+    decision = client.post(
+        "/api/predictions/expired/decisions",
+        json={"decision": "confirmed", "reason": "Назначена проверка объекта"},
+    )
+
+    response = client.post("/api/predictions/expired/service-request-drafts", json={})
+
+    assert decision.status_code == 409
+    assert decision.json() == {"detail": "Горизонт прогноза истёк"}
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Горизонт прогноза истёк"}
+
+
+def test_latest_rejection_blocks_prediction_draft_and_retries_are_idempotent(
+    client: TestClient, tmp_path, monkeypatch
+):
+    content = prediction_json("prediction-003").replace(
+        '"predicted_at": "2026-09-15T18:00:00+03:00"',
+        '"predicted_at": "2099-09-15T18:00:00+03:00"',
+    )
+    write_prediction_export(tmp_path, "sensor_failure", "v1", content)
+    monkeypatch.setattr(predictions, "ML_MODELS_DIRECTORY", tmp_path, raising=False)
+
+    confirmed = client.post(
+        "/api/predictions/prediction-003/decisions",
+        json={"decision": "confirmed", "reason": "Назначена проверка объекта"},
+    )
+    first = client.post("/api/predictions/prediction-003/service-request-drafts", json={})
+    repeated = client.post("/api/predictions/prediction-003/service-request-drafts", json={})
+    rejected = client.post(
+        "/api/predictions/prediction-003/decisions",
+        json={"decision": "rejected", "reason": "Проверка не подтвердила риск"},
+    )
+    blocked = client.post("/api/predictions/prediction-003/service-request-drafts", json={})
+
+    assert confirmed.status_code == 201
+    assert first.status_code == repeated.status_code == 201
+    assert first.json()["draftId"] == repeated.json()["draftId"]
+    assert rejected.status_code == 201
+    assert blocked.status_code == 409
 
 
 def test_predictions_endpoint_rejects_tampered_export(client, tmp_path, monkeypatch):

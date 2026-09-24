@@ -5,10 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from threading import RLock
 
-from forpost_domain.incidents.entities import IncidentDecision, ServiceRequestDraft
+from forpost_domain.incidents.entities import (
+    IncidentDecision,
+    PredictionDecisionRecord,
+    ServiceRequestDraft,
+)
 
 GENESIS_HASH = "GENESIS_FORPOST_DEMO_OPERATIONS_V1"
 
@@ -96,14 +101,75 @@ class SqliteOperationsRepository:
         ).fetchall()
         return [IncidentDecision.model_validate_json(row["payload_json"]) for row in rows]
 
+    def record_prediction_decision(
+        self,
+        *,
+        prediction_id: str,
+        decision: str,
+        reason: str,
+        actor_id: str,
+        created_at: datetime,
+    ) -> PredictionDecisionRecord:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """INSERT INTO prediction_decisions
+                   (prediction_id, actor_id, created_at, decision, reason)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (prediction_id, actor_id, created_at.isoformat(), decision, reason),
+            )
+            sequence = int(cursor.lastrowid)
+            record = PredictionDecisionRecord(
+                sequence=sequence,
+                prediction_id=prediction_id,
+                decision=decision,
+                reason=reason,
+                actor_id=actor_id,
+                created_at=created_at,
+            )
+            self._append_audit(
+                "PREDICTION_DECISION_RECORDED",
+                actor_id,
+                prediction_id,
+                {"decision": decision, "predictionDecisionSequence": str(sequence)},
+                created_at.isoformat(),
+            )
+        return record
+
+    def latest_prediction_decision(
+        self, prediction_id: str, actor_id: str
+    ) -> PredictionDecisionRecord | None:
+        row = self._connection.execute(
+            """SELECT sequence, prediction_id, decision, reason, actor_id, created_at
+               FROM prediction_decisions
+               WHERE prediction_id = ? AND actor_id = ?
+               ORDER BY sequence DESC LIMIT 1""",
+            (prediction_id, actor_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return PredictionDecisionRecord(
+            sequence=row["sequence"],
+            prediction_id=row["prediction_id"],
+            decision=row["decision"],
+            reason=row["reason"],
+            actor_id=row["actor_id"],
+            created_at=row["created_at"],
+        )
+
     def create_draft(self, draft: ServiceRequestDraft) -> ServiceRequestDraft:
         payload = _canonical_json(draft.model_dump(mode="json"))
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT INTO service_request_drafts
-                   (draft_id, incident_id, created_at, payload_json)
-                   VALUES (?, ?, ?, ?)""",
-                (draft.draft_id, draft.incident_id, draft.created_at.isoformat(), payload),
+                   (draft_id, incident_id, category, created_at, payload_json)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    draft.draft_id,
+                    draft.incident_id,
+                    draft.category,
+                    draft.created_at.isoformat(),
+                    payload,
+                ),
             )
             self._append_audit(
                 "SERVICE_DRAFT_CREATED",
@@ -113,6 +179,30 @@ class SqliteOperationsRepository:
                 draft.created_at.isoformat(),
             )
         return draft
+
+    def create_prediction_draft(self, draft: ServiceRequestDraft) -> ServiceRequestDraft:
+        """Идемпотентно создаёт один черновик для стабильного ID прогноза."""
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT payload_json FROM service_request_drafts
+                   WHERE incident_id = ? AND category = 'prediction_follow_up'
+                   ORDER BY created_at, draft_id LIMIT 1""",
+                (draft.incident_id,),
+            ).fetchone()
+            if row is not None:
+                return ServiceRequestDraft.model_validate_json(row["payload_json"])
+            try:
+                return self.create_draft(draft)
+            except sqlite3.IntegrityError:
+                row = self._connection.execute(
+                    """SELECT payload_json FROM service_request_drafts
+                       WHERE incident_id = ? AND category = 'prediction_follow_up'
+                       ORDER BY created_at, draft_id LIMIT 1""",
+                    (draft.incident_id,),
+                ).fetchone()
+                if row is None:
+                    raise
+                return ServiceRequestDraft.model_validate_json(row["payload_json"])
 
     def list_drafts(self) -> list[ServiceRequestDraft]:
         rows = self._connection.execute(
@@ -211,9 +301,20 @@ class SqliteOperationsRepository:
             CREATE TABLE IF NOT EXISTS service_request_drafts (
                 draft_id TEXT PRIMARY KEY,
                 incident_id TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS prediction_decisions (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                prediction_id TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                reason TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_prediction_decisions_latest
+                ON prediction_decisions (prediction_id, actor_id, sequence DESC);
             CREATE TABLE IF NOT EXISTS idempotency_keys (
                 key TEXT PRIMARY KEY,
                 fingerprint TEXT NOT NULL,
@@ -232,6 +333,25 @@ class SqliteOperationsRepository:
             INSERT OR IGNORE INTO schema_migrations (version) VALUES (1);
             """
         )
+        with self._connection:
+            columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(service_request_drafts)")
+            }
+            if "category" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE service_request_drafts ADD COLUMN category TEXT NOT NULL DEFAULT ''"
+                )
+            self._connection.execute(
+                """UPDATE service_request_drafts
+                   SET category = json_extract(payload_json, '$.category')
+                   WHERE category = ''"""
+            )
+            self._connection.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_prediction_draft_incident
+                   ON service_request_drafts (incident_id)
+                   WHERE category = 'prediction_follow_up'"""
+            )
 
 
 def _canonical_json(value: object) -> str:

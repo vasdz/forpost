@@ -2,12 +2,36 @@ import { describe, expect, it, vi } from 'vitest';
 import { fetchModelEvaluation } from './modelEvaluationClient';
 
 const validReport = {
-  format_version: 1,
+  format_version: 2,
   task: 'sensor_failure',
   version: 'v12',
   status: 'published',
   evidence_tier: 'proxy',
-  label_strategy: 'silence_horizon_proxy',
+  label_strategy: 'cadence_adjusted_silence_horizon_proxy_v2',
+  task_semantics: 'risk_of_unexpected_telemetry_silence_within_horizon',
+  feature_schema_version: '6',
+  config_sha256: 'a'.repeat(64),
+  library_versions: {
+    numpy: '2.3.3', pandas: '2.3.3', 'scikit-learn': '1.7.2',
+    skops: '0.13.0', catboost: '1.2.8', lightgbm: '4.6.0',
+  },
+  rolling_folds: [
+    { index: 1, train_rows: 80, calibration_rows: 20, validation_rows: 14, threshold: 0.6,
+      metrics: { precision: 0.78, recall: 0.68, f1: 0.73, pr_auc: 0.8, roc_auc: 0.81, brier_score: 0.15, expected_calibration_error: 0.07, alert_rate: 0.17 } },
+    { index: 2, train_rows: 100, calibration_rows: 20, validation_rows: 13, threshold: 0.6,
+      metrics: { precision: 0.8, recall: 0.7, f1: 0.75, pr_auc: 0.81, roc_auc: 0.82, brier_score: 0.14, expected_calibration_error: 0.06, alert_rate: 0.16 } },
+    { index: 3, train_rows: 120, calibration_rows: 20, validation_rows: 13, threshold: 0.6,
+      metrics: { precision: 0.82, recall: 0.72, f1: 0.77, pr_auc: 0.82, roc_auc: 0.83, brier_score: 0.13, expected_calibration_error: 0.05, alert_rate: 0.15 } },
+  ],
+  operating_profiles: {
+    high_precision: { threshold: 0.72, precision: 0.88, recall: 0.55, alert_rate: 0.1 },
+    balanced: { threshold: 0.6, precision: 0.8, recall: 0.7, alert_rate: 0.16 },
+    high_recall: { threshold: 0.42, precision: 0.72, recall: 0.86, alert_rate: 0.25 },
+  },
+  validation_confidence_intervals: Object.fromEntries(
+    ['precision', 'recall', 'f1', 'pr_auc', 'roc_auc', 'brier_score', 'expected_calibration_error', 'alert_rate']
+      .map((key) => [key, { lower: 0.6, upper: 0.9, level: 0.95, method: 'student_t_across_rolling_folds' }]),
+  ),
   horizon_hours: 48,
   created_at: '2026-09-21T12:00:00+03:00',
   reason_code: null,
@@ -75,12 +99,24 @@ describe('fetchModelEvaluation', () => {
     await expect(fetchModelEvaluation(fetcher as typeof fetch)).resolves.toEqual({
       status: 'ready',
       evaluation: {
-        formatVersion: 1,
+        formatVersion: 2,
         task: 'sensor_failure',
         version: 'v12',
         status: 'published',
         evidenceTier: 'proxy',
-        labelStrategy: 'silence_horizon_proxy',
+        labelStrategy: 'cadence_adjusted_silence_horizon_proxy_v2',
+        taskSemantics: 'risk_of_unexpected_telemetry_silence_within_horizon',
+        featureSchemaVersion: '6',
+        configSha256: 'a'.repeat(64),
+        libraryVersions: expect.objectContaining({ numpy: '2.3.3', lightgbm: '4.6.0' }),
+        rollingFolds: expect.arrayContaining([expect.objectContaining({ index: 1, validationRows: 14 })]),
+        operatingProfiles: expect.objectContaining({
+          highPrecision: { threshold: 0.72, precision: 0.88, recall: 0.55, alertRate: 0.1 },
+          balanced: { threshold: 0.6, precision: 0.8, recall: 0.7, alertRate: 0.16 },
+        }),
+        validationConfidenceIntervals: expect.objectContaining({
+          precision: { lower: 0.6, upper: 0.9, level: 0.95, method: 'student_t_across_rolling_folds' },
+        }),
         horizonHours: 48,
         createdAt: '2026-09-21T12:00:00+03:00',
         reasonCode: null,
@@ -111,6 +147,16 @@ describe('fetchModelEvaluation', () => {
 
     await expect(fetchModelEvaluation(extraKey as typeof fetch)).resolves.toEqual({ status: 'unavailable' });
     await expect(fetchModelEvaluation(invalidMetric as typeof fetch)).resolves.toEqual({ status: 'unavailable' });
+  });
+
+  it.each([
+    { operating_profiles: { ...validReport.operating_profiles, balanced: { ...validReport.operating_profiles.balanced, precision: '0.8' } } },
+    { rolling_folds: [{ ...validReport.rolling_folds[0], index: 0 }] },
+    { validation_confidence_intervals: { ...validReport.validation_confidence_intervals, precision: { lower: 0.9, upper: 0.6, level: 0.95, method: 'student_t_across_rolling_folds' } } },
+    { library_versions: { ...validReport.library_versions, unknown: '1.0.0' } },
+  ])('отклоняет повреждённые validation-доказательства %#', async (invalidEvidence) => {
+    const fetcher = vi.fn(async () => jsonResponse({ ...validReport, ...invalidEvidence }));
+    await expect(fetchModelEvaluation(fetcher as typeof fetch)).resolves.toEqual({ status: 'unavailable' });
   });
 
   it.each([
