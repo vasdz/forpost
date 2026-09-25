@@ -108,6 +108,28 @@ data/raw (локально, вне Git)
   Semgrep не дал findings. Полный security audit выявил и после этого были
   исправлены DNS-rebinding для demo-сессии и анонимная выдача prediction feed.
 
+### Kill chain и MITRE ATT&CK
+
+Полная модель угроз находится в [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+Она описывает сквозную kill chain: начальный доступ через зависимость/CI либо
+секрет -> чтение или подмена локальной выгрузки -> data/label poisoning или
+подмена model artifact -> ложный риск в UI -> ошибочное действие диспетчера и
+попытка скрыть следы. Для каждого шага определены защитные барьеры и остаточный
+риск.
+
+| ATT&CK / риск | Реализованный контроль |
+| --- | --- |
+| T1195.001: компрометация зависимостей и dev tools | lockfile, hash-pinned Python lock, audits, Ruff, Bandit, Semgrep, TruffleHog |
+| T1565.001: подмена данных, меток или ML-артефакта | schema validation, temporal split, manifests SHA-256, immutable versioned registry, Skops allowlist |
+| T1499: отказ в обслуживании | chunked loading, лимиты файлов/body, Pydantic bounds, rate limiting, ограничение inference latency |
+| T1552.001: секреты в файлах | `.env` ignore, scanning, short demo assertions, HttpOnly cookies, secret values не логируются |
+| CWE-22 / T1005: path/symlink escape и чтение локальных данных | fixed roots, canonical paths, symlink rejection, allowlist task/version |
+| T1041: утечка данных через Git/сеть | Git perimeter guards, loopback-only listener, `no-store`, UI не читает raw |
+
+Остаточный риск честно зафиксирован: пока нет HSM/KMS-подписи publisher-а,
+центрального secrets manager, корпоративного IdP/MFA, SIEM, TLS deployment,
+backup/RTO и защищённой сегментации production-контура.
+
 Ограничения: нет корпоративного IdP/MFA, TLS-termination, PostgreSQL,
 центрального SIEM, подписей издателя ML-релизов, backup/RTO и LAN/Internet
 deployment. Поэтому это защищённый локальный стенд, а не готовая КИИ-production
@@ -146,6 +168,24 @@ deployment. Поэтому это защищённый локальный сте
 эксплуатация. По качественным критериям текущий стенд может претендовать на
 высокую оценку за техническую часть, но максимум без трёх источников и трёх
 дополнительных моделей недостижим.
+
+### Рабочий прогноз баллов
+
+ТЗ не задаёт шкалу или веса, поэтому это не официальный расчёт. При типичной
+100-балльной экспертизе разумный диапазон текущего стенда - **65-75/100**:
+
+- **высокая оценка** за идею, стек, реальный локальный контур, UI, тесты,
+  документацию, security architecture и одну работающую ML-задачу;
+- **средняя оценка** за доказательность: есть отдельные validation/test
+  метрики и прогнозы, но это proxy риска тишины телеметрии с quality status
+  `limited`, а не подтверждённая физическая поломка;
+- **неполученные баллы** за три отсутствующие ML-задачи, их источники,
+  GIS, внешние read-only интеграции, PostgreSQL, LDAP/AD, TLS/SIEM/backup и
+  production deployment.
+
+При получении источников и закрытии трёх моделей/сквозных сценариев проект
+может претендовать на 80+ по такой условной шкале; без них обещать максимум
+было бы недостоверно.
 
 ## Приоритетные шаги для дополнительных баллов
 
