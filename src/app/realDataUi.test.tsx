@@ -214,6 +214,14 @@ describe('интерфейс локального снимка', () => {
     await waitFor(() => expect(screen.getByRole('table', { name: 'Табличное представление схемы объектов' })).toHaveTextContent('Объект 1'));
   });
 
+  it('не выводит подписи всех ресурсов до выбора узла', async () => {
+    const { container } = render(<TopologyPage />);
+
+    await waitFor(() => expect(container.querySelector('svg[role="img"]')).not.toBeNull());
+
+    expect(container.querySelectorAll('svg text')).toHaveLength(0);
+  });
+
   it('не показывает anomaly score как результат без валидированной модели', async () => {
     render(<FireRiskPage />);
 
