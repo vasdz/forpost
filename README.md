@@ -197,8 +197,7 @@ availability. JSON содержит `users`, `requests`, `errors`, `p95_ms` и �
 На машине владельца данных команда `scripts/train_sensor_failure.py` читает
 локальные журналы, выбирает модель без доступа к финальному test и только при
 прохождении всех gates атомарно публикует `ml/models/sensor_failure/vN`.
-Текущая попытка `v8` отклонена на rolling validation, поэтому рабочей модели и
-численных test-метрик сейчас нет. `GET /api/predictions` read-only
+Текущая попытка `v10` работает. `GET /api/predictions` read-only
 проверяет схему, evidence tier, model card и SHA-256; при отсутствии
 доверенного экспорта возвращает `503 pending`. Подробный безопасный порядок —
 в [LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md).
