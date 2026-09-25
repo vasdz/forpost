@@ -31,7 +31,7 @@ function SchematicDiagram({ topology }: { topology: TopologyFeatureCollection })
   return (
     <Card className="overflow-hidden p-0">
       <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2">
-        <span className="text-xs text-[var(--color-text-muted)]"><Move size={14} className="mr-1 inline" />Перетаскивайте, нажимайте ресурсы; масштаб {Math.round(scale * 100)}%</span>
+        <span className="text-xs text-[var(--color-text-muted)]"><Move size={14} className="mr-1 inline" />Перетаскивайте, наведите на ресурс; масштаб {Math.round(scale * 100)}%</span>
         <div className="flex gap-1">
           <Button size="sm" variant="ghost" aria-label="Уменьшить масштаб" onClick={() => setScale((value) => Math.max(.5, value - .2))}><Minus size={15} /></Button>
           <Button size="sm" variant="ghost" aria-label="Увеличить масштаб" onClick={() => setScale((value) => Math.min(4, value + .2))}><Plus size={15} /></Button>
@@ -42,15 +42,15 @@ function SchematicDiagram({ topology }: { topology: TopologyFeatureCollection })
       <div className="h-[430px] touch-none cursor-grab overflow-hidden bg-[var(--color-panel-2)] active:cursor-grabbing" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); setDrag({ x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y }); }} onPointerMove={(event) => { if (drag) setPan({ x: drag.panX + event.clientX - drag.x, y: drag.panY + event.clientY - drag.y }); }} onPointerUp={() => setDrag(null)} onWheel={(event) => { event.preventDefault(); setScale((value) => Math.max(.5, Math.min(4, value + (event.deltaY < 0 ? .15 : -.15)))); }}>
         <svg role="img" aria-labelledby="topology-title topology-desc" viewBox={box} className="h-full w-full origin-center transition-transform duration-100" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
           <title id="topology-title">Условная схема объектов</title>
-          <desc id="topology-desc">На концах линий показаны ресурсы из локального снимка. Нажмите ресурс, чтобы прочитать имя, ID и тип. Координаты не являются географическими.</desc>
+          <desc id="topology-desc">На концах линий показаны ресурсы из локального снимка. Наведите курсор на ресурс, чтобы прочитать имя, ID и тип. Координаты не являются географическими.</desc>
           {topology.features.flatMap((feature) => feature.geometry.coordinates.map((line, index) => <polyline key={`${feature.id}-${index}`} points={line.map(([x, y]) => `${x},${y}`).join(' ')} fill="none" stroke="var(--color-data)" strokeWidth="0.08" vectorEffect="non-scaling-stroke" />))}
           {nodes.map(({ feature, point }) => {
             const showLabel = selectedId === feature.id || (scale >= 2.8 && feature.properties.parentId === null);
-            return <g key={feature.id} onClick={(event) => { event.stopPropagation(); setSelectedId(feature.id); }} className="cursor-pointer"><rect x={point[0] - .2} y={point[1] - .2} width=".4" height=".4" rx=".05" fill={selectedId === feature.id ? 'var(--color-warning)' : 'var(--color-data)'} vectorEffect="non-scaling-stroke" /><title>{`Ресурс: ${feature.properties.dispatcherName} · ID ${feature.properties.objectId} · ${feature.properties.objectKind}`}</title>{showLabel && <><text x={point[0] + .3} y={point[1] - .15} fill="var(--color-text)" fontSize="0.42" stroke="var(--color-panel-2)" strokeWidth="0.08" paintOrder="stroke">{feature.properties.dispatcherName}</text><text x={point[0] + .3} y={point[1] + .35} fill="var(--color-text-muted)" fontSize="0.32" stroke="var(--color-panel-2)" strokeWidth="0.06" paintOrder="stroke">ID {feature.properties.objectId} · {feature.properties.objectKind}</text></>}</g>;
+            return <g key={feature.id} onMouseEnter={() => setSelectedId(feature.id)} className="cursor-pointer"><rect x={point[0] - .2} y={point[1] - .2} width=".4" height=".4" rx=".05" fill={selectedId === feature.id ? 'var(--color-warning)' : 'var(--color-data)'} vectorEffect="non-scaling-stroke" /><title>{`Ресурс: ${feature.properties.dispatcherName} · ID ${feature.properties.objectId} · ${feature.properties.objectKind}`}</title>{showLabel && <><text x={point[0] + .3} y={point[1] - .15} fill="var(--color-text)" fontSize="0.42" stroke="var(--color-panel-2)" strokeWidth="0.08" paintOrder="stroke">{feature.properties.dispatcherName}</text><text x={point[0] + .3} y={point[1] + .35} fill="var(--color-text-muted)" fontSize="0.32" stroke="var(--color-panel-2)" strokeWidth="0.06" paintOrder="stroke">ID {feature.properties.objectId} · {feature.properties.objectKind}</text></>}</g>;
           })}
         </svg>
       </div>
-      <p className="border-t border-[var(--color-border)] px-4 py-2 text-xs text-[var(--color-text-muted)]"><span className="mr-3 inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-sm bg-[var(--color-data)]" /> Ресурс из снимка</span>Линии — иерархические связи. Нажмите ресурс, чтобы показать подпись; координаты условные.</p>
+      <p className="border-t border-[var(--color-border)] px-4 py-2 text-xs text-[var(--color-text-muted)]"><span className="mr-3 inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-sm bg-[var(--color-data)]" /> Ресурс из снимка</span>Линии — иерархические связи. Наведите курсор на ресурс, чтобы показать подпись; координаты условные.</p>
     </Card>
   );
 }

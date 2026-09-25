@@ -222,6 +222,15 @@ describe('интерфейс локального снимка', () => {
     expect(container.querySelectorAll('svg text')).toHaveLength(0);
   });
 
+  it('показывает сведения о ресурсе при наведении на узел схемы', async () => {
+    const { container } = render(<TopologyPage />);
+
+    await waitFor(() => expect(container.querySelector('svg rect')).not.toBeNull());
+    fireEvent.mouseEnter(container.querySelector('svg rect')!);
+
+    expect((await screen.findByText('Ресурс:')).parentElement).toHaveTextContent('Объект 1');
+  });
+
   it('не показывает anomaly score как результат без валидированной модели', async () => {
     render(<FireRiskPage />);
 
