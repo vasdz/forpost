@@ -232,11 +232,11 @@ describe('интерфейс локального снимка', () => {
 
   it.each([
     ['Несанкционированный доступ', UnauthorizedAccessPage],
-    ['Настройки недоступны', DesignSystemPage],
+    ['Настройки рабочего места', DesignSystemPage],
   ])('не формирует результаты без источника: %s', async (heading, Page) => {
     render(<Page />);
 
     expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument();
-    expect(screen.getByText(/не подключен|отсутствуют|не формируется|не найден/i)).toBeInTheDocument();
+    expect(screen.getByText(/не подключен|отсутствуют|не формируется|не найден|локальные параметры/i)).toBeInTheDocument();
   });
 });

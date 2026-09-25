@@ -575,7 +575,9 @@ def _prediction_payload(
                     key: metrics[key]
                     for key in ("precision", "recall", "f1", "pr_auc", "brier_score")
                 },
-                "quality_status": "passed",
+                # Локальный advisory-профиль публикует фактические метрики без
+                # заявления о прохождении более строгого эксплуатационного gate.
+                "quality_status": "limited",
                 "limitations": limitations,
                 "predicted_at": current.iloc[index]["prediction_at"].isoformat(),
                 "horizon_hours": horizon_hours,
