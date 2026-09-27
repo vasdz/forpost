@@ -145,6 +145,12 @@ npm run dev:stack
 Создание локального snapshot и demo-сессии описаны в
 [LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md). Для воспроизводимой экспертизы кода:
 
+Текущий локальный release — `v10`; его нельзя переиспользовать для обучения.
+Новая локальная попытка после подготовки собственных данных получает новую
+версию, например `& .\.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v11`.
+Она не входит в setup-demo и публикуется только при прохождении собственных
+проверок release.
+
 ```powershell
 npm run verify:submission:fast
 ```
