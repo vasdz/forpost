@@ -29,9 +29,14 @@ export function getLocalStackLaunches(env = process.env, extraArguments = []) {
   }
 
   const token = createServiceToken();
+  const demoAccessKey = createServiceToken();
+  const demoAssertionSecret = createServiceToken();
   const sharedEnv = {
     ...env,
     FORPOST_API_SERVICE_TOKEN: token,
+    FORPOST_DEMO_MODE: '1',
+    FORPOST_DEMO_ACCESS_KEY: demoAccessKey,
+    FORPOST_DEMO_ASSERTION_SECRET: demoAssertionSecret,
   };
   const nextLaunch = getLocalNextLaunch('dev', [], env);
 

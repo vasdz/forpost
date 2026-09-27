@@ -92,6 +92,16 @@ describe('локальный стек', () => {
     expect(launches.next.env.FORPOST_API_SERVICE_TOKEN).toBe(
       launches.api.env.FORPOST_API_SERVICE_TOKEN,
     );
+    expect(launches.api.env.FORPOST_DEMO_MODE).toBe('1');
+    expect(launches.api.env.FORPOST_DEMO_ACCESS_KEY).toHaveLength(64);
+    expect(launches.api.env.FORPOST_DEMO_ASSERTION_SECRET).toHaveLength(64);
+    expect(launches.next.env.FORPOST_DEMO_MODE).toBe('1');
+    expect(launches.next.env.FORPOST_DEMO_ACCESS_KEY).toBe(
+      launches.api.env.FORPOST_DEMO_ACCESS_KEY,
+    );
+    expect(launches.next.env.FORPOST_DEMO_ASSERTION_SECRET).toBe(
+      launches.api.env.FORPOST_DEMO_ASSERTION_SECRET,
+    );
   });
 
   it('передаёт явный проектный Python в API launcher', () => {
