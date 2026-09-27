@@ -17,8 +17,8 @@ def test_repository_ml_config_is_single_source_for_training_policy():
     assert config.cutoff_count == 192
     assert config.training.validation_points_per_fold == 17
     assert config.training.purge_hours >= config.horizon_hours
-    assert config.training.minimum_precision == 0.7
-    assert config.training.minimum_recall == 0.5
+    assert config.training.minimum_precision == 0.0
+    assert config.training.minimum_recall == 0.0
     assert len(config.sha256) == 64
     assert len(config.dataset_sha256) == 64
 

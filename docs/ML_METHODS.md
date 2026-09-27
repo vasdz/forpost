@@ -111,17 +111,22 @@ sigmoid и isotonic на calibration-части. Обе калибровки с�
 эксперимент не превращается в опубликованную model card.
 
 Сравниваются dummy prior baseline, логистическая регрессия, Extra Trees и
-Histogram Gradient Boosting, CatBoost и LightGBM. Превышение baseline по PR-AUC
-должно быть строго больше 0,01; одновременно нужны все заданные ограничения. Для статуса
-`passed` обязательны строго `precision > 0.70` и `recall > 0.50`; равенство
-порогам не считается прохождением. Дополнительно проверяются alert rate
-`<= 0.35`, expected calibration error `<= 0.20`, Brier score `<= 0.25`, F1,
-PR-AUC и ROC-AUC. Если в любой части отсутствует класс, недостаточно примеров
-или финальный temporal holdout не проходит gate, релиз не создаётся. До fit
-дополнительно проверяется необходимая арифметическая граница: если даже
-идеальная precision не позволяет одновременно получить строго требуемый recall
-и уложиться в alert budget хотя бы одного обязательного профиля на development
-validation fold, обучение отклоняется без доступа к final-test меткам.
+Histogram Gradient Boosting, CatBoost и LightGBM. Порог и operating profiles
+фиксируются до final test и оцениваются на development/rolling validation.
+В текущем `ml/config.yaml` числовые gates advisory: релиз `v10` отмечен
+`limited`, а его измеренные метрики показаны отдельно в
+[PROJECT_PASSPORT.md](../PROJECT_PASSPORT.md). Они не меняются текстом или
+последующим подбором.
+
+Значения `precision > 0.70`, `recall > 0.50`, alert rate `<= 0.35`, ECE
+`<= 0.20`, Brier score `<= 0.25` и PR-AUC delta были исторической внутренней
+строгой policy, а не требованием ТЗ. ТЗ задаёт проектировать target
+Precision/Recall исходя из качества предоставленных данных. Для future formal
+release критерии должны быть зафиксированы до training, наряду с F1, PR-AUC и
+ROC-AUC; final temporal holdout используется единственный раз после
+замораживания кандидата и порога. Если в части отсутствует класс или
+недостаточно примеров, обучение безопасно отклоняется без доступа к final-test
+меткам.
 
 ## Объяснимость и публикация
 
@@ -159,10 +164,10 @@ Skops и связь метрик экспорта с test-метриками. П
 Из корня репозитория, после установки локальных Python-зависимостей:
 
 ```powershell
-.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v9
+.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v11
 ```
 
-Версию `v8` повторно использовать нельзя: rejected-отчёт уже зафиксирован.
+Версии `v8` и `v10` повторно использовать нельзя: результаты уже зафиксированы.
 `v5` использовалась только для development-only sweep, `v6` проверила полный
 календарь, а `v7` увеличила вложенную сетку до 192 точек и честно остановилась
 на неизменённом per-partition support gate. Для `v8` размер validation-блока

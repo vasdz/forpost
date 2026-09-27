@@ -247,4 +247,3 @@ def test_tampered_or_release_mismatched_evidence_fails_closed(client, forecast_f
     artifact["version"] = "v11"
     forecast_fact_route.FORECAST_FACT_PATH.write_text(json.dumps(artifact), encoding="utf-8")
     assert _authorize(client).status_code == 503
-

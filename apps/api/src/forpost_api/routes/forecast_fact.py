@@ -40,4 +40,3 @@ async def get_forecast_fact(_subject: Subject):
                 "reason_code": "forecast_fact_unavailable",
             },
         )
-

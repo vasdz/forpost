@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { getLocalNextLaunch } from './run-local-next.mjs';
+import { resolvePythonExecutable } from './verify-submission.mjs';
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const API_SOURCE_PATHS = [
@@ -36,7 +37,7 @@ export function getLocalStackLaunches(env = process.env, extraArguments = []) {
 
   return {
     api: {
-      command: 'python',
+      command: resolvePythonExecutable(REPOSITORY_ROOT, process.platform, env),
       args: ['-m', 'uvicorn', 'forpost_api.main:app', '--host', '127.0.0.1', '--port', '8000'],
       env: {
         ...sharedEnv,

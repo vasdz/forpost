@@ -27,6 +27,20 @@ const DATA_EXPORT_EXTENSIONS = new Set([
 ]);
 
 const DATA_README_PATH = 'data/README.md';
+const ENVIRONMENT_TEMPLATE_PATH = '.env.example';
+const MODEL_ARTIFACT_EXTENSIONS = new Set([
+  '.cbm',
+  '.h5',
+  '.joblib',
+  '.keras',
+  '.onnx',
+  '.pickle',
+  '.pkl',
+  '.pt',
+  '.pth',
+  '.safetensors',
+  '.skops',
+]);
 
 function normalizePath(filePath) {
   return filePath.replaceAll('\\', '/');
@@ -36,6 +50,17 @@ function hasProtectedExportExtension(normalizedPath) {
   const fileName = normalizedPath.split('/').at(-1)?.toLowerCase() ?? '';
   const extension = fileName.slice(fileName.lastIndexOf('.'));
   return DATA_EXPORT_EXTENSIONS.has(extension);
+}
+
+function hasModelArtifactExtension(normalizedPath) {
+  const fileName = normalizedPath.split('/').at(-1)?.toLowerCase() ?? '';
+  const extension = fileName.slice(fileName.lastIndexOf('.'));
+  return MODEL_ARTIFACT_EXTENSIONS.has(extension);
+}
+
+function isEnvironmentSecretFile(normalizedPath) {
+  const fileName = normalizedPath.split('/').at(-1)?.toLowerCase() ?? '';
+  return fileName.startsWith('.env') && normalizedPath !== ENVIRONMENT_TEMPLATE_PATH;
 }
 
 export function findGuardViolations(changedFiles) {
@@ -52,6 +77,14 @@ export function findGuardViolations(changedFiles) {
 
     if (windowsNormalizedPath.startsWith('ml/models/')) {
       violations.push(`Запрещено добавлять в индекс ML-артефакт: ${normalizedPath}`);
+    }
+
+    if (isEnvironmentSecretFile(normalizedPath)) {
+      violations.push(`Запрещено добавлять файл секретов: ${normalizedPath}`);
+    }
+
+    if (!windowsNormalizedPath.startsWith('ml/models/') && hasModelArtifactExtension(normalizedPath)) {
+      violations.push(`Запрещено добавлять ML-артефакт вне реестра: ${normalizedPath}`);
     }
 
     // Расширения не заменяют серверный DLP, но предотвращают случайный перенос
@@ -93,6 +126,33 @@ export function getStagedFiles(workingDirectory = process.cwd()) {
     path: filePath,
     size: getBlobSize('', filePath, workingDirectory),
   }));
+}
+
+export function getTrackedFiles(workingDirectory = process.cwd()) {
+  const entries = execFileSync('git', ['ls-files', '--stage', '-z'], {
+    cwd: workingDirectory,
+    encoding: 'utf8',
+  })
+    .split('\0')
+    .filter(Boolean);
+
+  return entries.map((entry) => {
+    const [metadata, filePath] = entry.split('\t');
+    const blobId = metadata?.split(' ')[1];
+    if (typeof filePath !== 'string' || typeof blobId !== 'string') {
+      throw new Error('Git вернул неполную запись отслеживаемого файла.');
+    }
+    return {
+      path: filePath,
+      size: Number.parseInt(
+        execFileSync('git', ['cat-file', '-s', blobId], {
+          cwd: workingDirectory,
+          encoding: 'utf8',
+        }),
+        10,
+      ),
+    };
+  });
 }
 
 function getRevisionCommits(revisionRange, workingDirectory) {
@@ -196,6 +256,10 @@ function parseArguments(argumentsList) {
     return { mode: 'staged' };
   }
 
+  if (argumentsList.length === 1 && argumentsList[0] === '--tracked') {
+    return { mode: 'tracked' };
+  }
+
   if (argumentsList.length === 2 && argumentsList[0] === '--range') {
     return { mode: 'range', revisionRange: argumentsList[1] };
   }
@@ -209,7 +273,7 @@ function parseArguments(argumentsList) {
   }
 
   throw new Error(
-    'Использование: node scripts/pre-commit-guard.mjs [--range <base>..<head> | --new-branch-range <default> <head>]',
+    'Использование: node scripts/pre-commit-guard.mjs [--tracked | --range <base>..<head> | --new-branch-range <default> <head>]',
   );
 }
 
@@ -219,7 +283,11 @@ function main() {
     mode === 'new-branch-range'
       ? getNewBranchRange(defaultBranchRevision, headRevision)
       : revisionRange;
-  const changedFiles = mode === 'staged' ? getStagedFiles() : getChangedFiles(selectedRange);
+  const changedFiles = mode === 'staged'
+    ? getStagedFiles()
+    : mode === 'tracked'
+      ? getTrackedFiles()
+      : getChangedFiles(selectedRange);
   const violations = findGuardViolations(changedFiles);
 
   if (violations.length > 0) {

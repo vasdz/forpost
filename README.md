@@ -1,198 +1,171 @@
 # ФОРПОСТ — ситуационный центр АО «Москоллектор»
 
-ФОРПОСТ — веб-сервис поддержки диспетчерских решений для инженерных
-коллекторов Москвы. Платформа показывает только подтверждённые обезличенные
-наблюдения из локального снимка и результаты проверенного ML-релиза с явным
-уровнем доказательности. Proxy прекращения телеметрии не выдаётся за
-подтверждённую поломку, рекомендацию или диагноз.
+ФОРПОСТ — локальный веб-ситуационный центр для поддержки диспетчерских решений
+в инженерных коллекторах. Он отделяет подтверждённые наблюдения от прогноза,
+не автоматизирует действия диспетчера и сохраняет проверяемую цепочку решения
+до локального черновика заявки.
 
-## Статус
+## Что реализовано
 
-Сейчас готов защитно ограниченный локальный стенд: интерфейс Next.js, адаптер
-обезличенных данных, fail-closed FastAPI, Bearer/RBAC, аудит целостности,
-тесты и CI-гейты. Локальный pipeline может обучить только
-`sensor_failure` по слабой метке `silence_horizon_proxy`; Пожарный риск, доступ и износ остаются
-недоступными до появления подтверждённых источников и не заменяются
-демонстрационными значениями.
+- веб-ситуационный центр на Next.js и FastAPI;
+- локальный обезличенный snapshot: UI не читает `data/` напрямую;
+- 24-часовой proxy ML-прогноз риска прекращения ожидаемой телеметрии;
+- факторы модели, версия, evidence tier и отдельная observed telemetry;
+- human-in-the-loop решение диспетчера с причиной;
+- локальный audit trail с проверкой целостности;
+- серверное формирование локального `simulated` draft заявки;
+- RBAC/ABAC, CSRF/origin checks, rate limiting и integrity checks;
+- автоматические frontend/Python-тесты и GitHub Actions CI.
 
-Реализованы условная схема подтверждённой иерархии, центр прогнозных
-уведомлений, локальные demo-решения диспетчера и черновики заявок в SQLite.
-Центр связывает валидный ML-экспорт, observed-телеметрию, human-only решение и
-серверно сформированный черновик в одном проверяемом сценарии. Отдельная панель качества показывает
-отчёт оценки даже при отклонённом релизе; наличие отчёта не разрешает выдачу
-прогнозов. Это локальный стенд, а не промышленная интеграция с help-desk или AD.
+## Что ограничено входными данными
 
-## Архитектура
+| Направление | Статус | Причина |
+| --- | --- | --- |
+| Пожарный риск | недоступен | Нет подтверждённых связанных источников и target labels. |
+| Несанкционированный доступ | недоступен | Нет подтверждённых журналов СКУД, допусков и target labels. |
+| Износ инфраструктуры | недоступен | Нет подтверждённого реестра ТО/ремонтов и target labels. |
 
-```text
-Локальные обезличенные источники (data/raw, не в Git)
-    -> connectors / build_local_snapshot.py
-    -> ограниченный data/processed/local-situation.json (локально)
-    -> GET /api/local-situation (Next.js, no-store, только listener 127.0.0.1)
-    -> React UI + Zustand timeline + доступные таблицы и графики
+Это инженерная граница: при отсутствии подтверждённого источника и разметки
+система fail-closed и не публикует фиктивную вероятность. Единственная
+доступная ML-задача — `sensor_failure`: proxy риска тишины телеметрии, а не
+диагноз физического отказа датчика.
 
-Локальный ML-контур (data не покидает машину владельца)
-    -> causal features -> temporal split/purge -> holdout calibration
-    -> только после gates: ml/models/sensor_failure/vN + model card + manifests
-    -> GET /api/predictions: read-only проверка и импорт proxy-экспорта
-    -> UI: evidence tier, probability, horizon, глобальные факторы, решение
+## Сквозной сценарий
 
-Локальный браузер -> Next.js BFF -> FastAPI /api/v1
-    -> service-token для чтения / короткая demo-сессия для действий
-    -> RBAC/ABAC -> demo-решения и черновики в локальной SQLite
-    -> audit ledger -> в будущем неизменяемое внешнее хранилище
+**наблюдение → прогноз → факторы → observed telemetry → решение диспетчера → audit → draft заявки**
 
-Валидный prediction export -> /notifications
-    -> факторы + observed-телеметрия -> решение диспетчера
-    -> derived-from-prediction simulated-черновик -> /applications
+## Как проверить за 2 минуты
 
-train_sensor_failure.py -> data/processed/ml-evaluation.json
-    -> GET /api/model-evaluation -> пользовательская demo-сессия BFF
-    -> панель качества: rejected/published, validation/test отдельно
+После локального запуска откройте `http://127.0.0.1:3000`.
+
+1. [`/`](http://127.0.0.1:3000/) — оперативную сводку, временную шкалу и только подтверждённые наблюдения локального snapshot.
+2. [`/sensor-failure`](http://127.0.0.1:3000/sensor-failure) — 24-часовой proxy, evidence tier, раздельные validation/final-test метрики и ограничения модели.
+3. [`/notifications`](http://127.0.0.1:3000/notifications) — связь прогноза, факторов, observed telemetry и ручного решения; сценарий появляется при валидном локальном prediction export.
+4. [`/journals`](http://127.0.0.1:3000/journals) — журнал наблюдений, фильтры, карточку и решение с причиной без изменения исходного факта.
+5. [`/applications`](http://127.0.0.1:3000/applications) — связанный локальный `simulated` draft; он не отправляется во внешнюю ИС.
+6. [`/topology`](http://127.0.0.1:3000/topology) — негеографическую схему объектов: ID и иерархия из snapshot, координаты явно `simulated`.
+
+Если нет локального snapshot или проверенного prediction export, экран честно
+покажет недоступность. Их нельзя заменять демонстрационными значениями.
+
+## Архитектура и семантика данных
+
+```mermaid
+flowchart LR
+    RAW[data/raw: local only] --> CONN[Connectors]
+    CONN --> SNAP[Local anonymized snapshot]
+    SNAP --> TRAIN[ML train / evaluate]
+    TRAIN --> RELEASE[Versioned model release]
+    RELEASE --> API[FastAPI]
+    SNAP --> API
+    API --> BFF[Next.js BFF]
+    BFF --> UI[React UI]
+    UI --> DECISION[Human decision]
+    DECISION --> AUDIT[Local audit trail]
+    AUDIT --> DRAFT[Local simulated draft]
+
+    OBS[Observed data] -. distinct .-> UI
+    RELEASE -. prediction .-> UI
+    UI -. recommendation .-> DECISION
 ```
 
-Границы намеренные: UI не читает `data/` напрямую; connectors не вычисляют
-прогнозы; только локальная training-команда создаёт новую неизменяемую версию
-в `ml/models`; API и внешние интеграции читают её read-only и fail-closed.
+`observed` — факт из локального источника; `prediction` — результат
+проверенного ML-релиза; `recommendation` — помощь человеку, не команда;
+`simulated` draft — локальный результат demo-workflow. Эти сущности не
+взаимозаменяемы.
+
+## Текущее состояние ML
+
+Локальный release `v10` оценивает `cadence_adjusted_silence_horizon_proxy_v2`
+на горизонте 24 часа. CatBoost, sigmoid-калибровка, point-in-time признаки,
+temporal split, purge/embargo, отдельная calibration и final untouched test
+сохранены в методике. Модельный bundle и export проверяются manifest SHA-256
+перед read-only выдачей.
+
+| Метрика | Validation | Final test |
+| --- | ---: | ---: |
+| Precision | 0.585 | 0.608 |
+| Recall | 0.816 | 0.826 |
+| F1 | 0.680 | 0.700 |
+| PR-AUC | 0.632 | 0.797 |
+| ROC-AUC | 0.831 | 0.918 |
+| Brier score | 0.152 | 0.109 |
+| ECE | 0.091 | 0.069 |
+
+`v10` имеет статус `limited`: измеренные значения не подменяются и не
+выдаются за production SLA. Внутренние policy-gates выбираются при
+проектировании по качеству источника; они не являются фиксированным
+требованием ТЗ. Само ТЗ требует определить целевые Precision/Recall на этапе
+проектирования. Подробнее: [ML_METHODS.md](docs/ML_METHODS.md) и
+[ML_CAPABILITIES.md](docs/ML_CAPABILITIES.md).
 
 ## Быстрый локальный запуск
 
-1. Создайте Python-окружение и установите зависимости по
-   [docs/LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md). Не выполняйте внешние сканеры
-   из рабочей копии с реальными данными.
-2. На машине владельца данных вручную соберите ограниченный снимок:
+Windows:
 
-   ```powershell
-   & .\.venv\Scripts\python.exe scripts/build_local_snapshot.py
-   ```
+```powershell
+.\scripts\setup-demo.ps1
+.\.venv\Scripts\Activate.ps1
+npm run dev:stack
+```
 
-3. При необходимости создайте первый локальный proxy-релиз. Команда сама
-   отменит публикацию, если temporal holdout не прошёл gates:
+Linux/macOS:
 
-   ```powershell
-   & .\.venv\Scripts\python.exe scripts/train_sensor_failure.py --version v9
-   ```
+```sh
+sh scripts/setup-demo.sh
+. .venv/bin/activate
+npm run dev:stack
+```
 
-4. Установите frontend-зависимости и запустите локальный стек:
+`setup-demo` не читает `data/raw`, не строит snapshot и не обучает модель.
+Создание локального snapshot и demo-сессии описаны в
+[LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md). Для воспроизводимой экспертизы кода:
 
-   ```powershell
-   npm ci --ignore-scripts
-   .\.venv\Scripts\Activate.ps1
-   npm run dev:stack
-   ```
+```powershell
+npm run verify:submission:fast
+```
 
-`npm run dev:stack` запускает FastAPI на `127.0.0.1:8000` и Next.js только на
-`127.0.0.1`; им передаётся общий случайно сгенерированный service token. При
-остановке одного процесса launcher завершает второй; на Windows завершает
-всё принадлежащее ему дерево через `taskkill /PID /T /F`, включая worker Next.js,
-на Unix передаёт штатные сигналы. `npm run dev` и `npm run
-start` запускают только Next.js на `127.0.0.1`. Публикация порта, reverse proxy
-и LAN не поддерживаются для локального снимка.
+Быстрая проверка выполняет typecheck, lint, Ruff, staged/tracked perimeter,
+reviewer-document consistency и `git diff --check`. Полная локальная проверка:
 
-Для demo-действий и пользовательской панели оценки перед запуском задайте
-режим и временные секреты по [LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md), затем
-в панели качества на странице отказов датчиков нажмите «Войти в демо-режим ОДС».
-Наличие сработок или посещение журнала не требуется; после входа отчёт загружается
-повторно. `401` означает необходимость входа, `503` — недоступность отчёта.
-Сессия действует 5 минут и не является корпоративной авторизацией.
-Demo-режим запрещено публиковать в LAN или Интернет.
+```powershell
+npm run verify:submission:full
+```
 
-Готовый локальный прототип доступен после запуска по адресу
-`http://127.0.0.1:3000`; сквозной сценарий находится в разделе
-«Уведомления». Он появляется только при наличии валидного prediction export.
+Она дополняет fast suite frontend tests, build, pytest, Ruff format, Bandit и
+load check. Обе команды не читают `data/raw`, `data/processed` или `ml/models`.
 
-«Схема объектов» показывает GeoJSON `MultiLineString` по реальной иерархии с
-условными координатами (`simulated`), SVG и табличной альтернативой. Географии
-и координат Москвы здесь нет. В «Журналах наблюдений» можно записать решение с
-причиной и создать локальный черновик, который виден в «Заявках»; во внешнюю
-систему он не отправляется.
+## Screenshots
+
+Репозиторий не содержит макетов вместо работающего интерфейса. Реальные
+скриншоты можно добавить в [docs/assets/screenshots](docs/assets/screenshots/)
+по [чек-листу](docs/assets/screenshots/README.md): обзор, ML quality,
+notifications и decision/applications.
 
 ## Данные и безопасность
 
-- В Git допускается только [data/README.md](data/README.md); `data/raw` и
-  `data/processed` игнорируются и блокируются guard-ом.
-- Установите local Git hooks после clone: `npm run hooks:install`.
-- CI проверяет периметр до остальных jobs на каждом push и pull request.
-- Для фактической защиты Git-хостинга администратор обязан установить
-  `pre-receive` из `scripts/server-hooks/`; порядок установки и проверок — в
-  [docs/LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md).
-- API не принимает роли из клиентских заголовков. Отсутствующая Bearer-схема
-  получает `401`; настроенный service-token даёт локальному BFF роль ОДС для
-  чтения, но не право human-only записи. Demo-утверждения проверяются отдельно.
-  При отсутствии настроенного доверенного механизма API отвечает `503`.
-- BFF-чтение topology/availability/прогнозов/черновиков использует service-token
-  внутри loopback-стенда. `/api/model-evaluation` в браузере требует собственной
-  demo-сессии и передаёт её роль в API. Это ещё не общая корпоративная авторизация.
-
-## Известные риски
-
-Главные незакрытые границы — отсутствие криптографической подписи ML-релиза,
-SBOM и доверенного внутреннего registry, внешнего неизменяемого аудита,
-корпоративного IdP/MFA и защищённого сетевого deployment. Локальный SHA-256 manifest
-обнаруживает изменение артефакта, но не удостоверяет издателя. Модель угроз и
-принятые меры описаны в [THREAT_MODEL.md](docs/THREAT_MODEL.md), результаты
-последнего инструментального прогона — в
-[SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
-
-## Проверки
-
-```powershell
-npm run lint
-npm run typecheck
-npm test
-npm run build
-
-py -m pytest tests -q
-py -m ruff check .
-py -m ruff format --check .
-py -m bandit -r apps packages scripts -c .bandit.yaml
-py scripts/load_check.py --users 20 --requests-per-user 5
-```
-
-Последняя команда создаёт собственный временный детерминированный минимальный
-снимок и пустой реестр моделей, не читая `data/raw`, `data/processed` или
-`ml/models`. Временные артефакты удаляются, bindings и окружение восстанавливаются.
-Настоящий FastAPI в одном процессе ASGI обслуживает 20 конкурентных сессий,
-100 GET-запросов к topology и
-availability. JSON содержит `users`, `requests`, `errors`, `p95_ms` и явную
-пометку `local_asgi_read_only_not_sla`. Exit 0 означает ровно 20 пользователей
-без ошибок. Это проверка текущей машины, без браузера, Next.js, сети, TLS,
-корпоративных пользователей, ML inference и write-нагрузки; промышленный SLA
-ею не подтверждается.
-
-Полный безопасный порядок, включая Semgrep и TruffleHog, зафиксирован в
-[docs/LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md).
+- В Git допустим только [data/README.md](data/README.md); `data/raw` и
+  `data/processed` игнорируются и блокируются hooks, CI и server-side guard.
+- Локальный стек слушает только `127.0.0.1`; reverse proxy, LAN и Internet
+  deployment не поддерживаются.
+- BFF использует локальный service-token для чтения; demo-write требует
+  отдельного короткоживущего assertion, RBAC/ABAC, origin и CSRF.
+- Локальный SHA-256 manifest обнаруживает подмену artefact, но не заменяет
+  подпись издателя, IdP/MFA, SIEM, TLS, backup или production deployment.
 
 ## Документация
 
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — функциональная, компонентная и
-  интеграционная архитектура.
-- [USER_GUIDE.md](docs/USER_GUIDE.md) — действия диспетчера и обработка ошибок.
-- [ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md) — установка, запуск и эксплуатационные границы.
-- [API_REFERENCE.md](docs/API_REFERENCE.md) — реализованные BFF/API-контракты.
-- [TEST_PROTOCOL.md](docs/TEST_PROTOCOL.md) — воспроизводимые автоматические и ручные проверки.
-- [SPEC.md](docs/SPEC.md) — продуктовые и UI-границы.
-- [DATA_MAPPING.md](docs/DATA_MAPPING.md) — контракт локального снимка и
-  соответствие Приложению 1 ТЗ.
-- [ML_CAPABILITIES.md](docs/ML_CAPABILITIES.md) — доступность четырёх задач и
-  evidence tiers.
-- [ML_METHODS.md](docs/ML_METHODS.md) — temporal-методика, gates и артефакты.
-- [COMPONENT_INVENTORY.md](docs/COMPONENT_INVENTORY.md) — реализованные
-  компоненты, прямые библиотеки, lock-файлы и лицензионные ограничения.
-- [TZ_COMPLIANCE.md](docs/TZ_COMPLIANCE.md) — честная построчная сверка с ТЗ.
-- [SECURITY.md](docs/SECURITY.md) — политика безопасной эксплуатации.
-- [THREAT_MODEL.md](docs/THREAT_MODEL.md) — цепочка атак, MITRE ATT&CK и риски.
-- [PRIVACY.md](docs/PRIVACY.md) — минимизация и локальный периметр данных.
-- [SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) — защита данных и ограничения.
-- [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) — безопасный пятиминутный показ.
-- [ROADMAP.md](docs/ROADMAP.md) — этапы до промышленного контура.
+Начните с [START_HERE.md](START_HERE.md) и руководства эксперта
+[LTC_2026_SUBMISSION.md](LTC_2026_SUBMISSION.md).
 
-## Локальный ML-релиз
-
-На машине владельца данных команда `scripts/train_sensor_failure.py` читает
-локальные журналы, выбирает модель без доступа к финальному test и только при
-прохождении всех gates атомарно публикует `ml/models/sensor_failure/vN`.
-Текущая попытка `v10` работает. `GET /api/predictions` read-only
-проверяет схему, evidence tier, model card и SHA-256; при отсутствии
-доверенного экспорта возвращает `503 pending`. Подробный безопасный порядок —
-в [LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md).
+- [PROJECT_PASSPORT.md](PROJECT_PASSPORT.md) — фактическое состояние стенда.
+- [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) — безопасная пятиминутная демонстрация.
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — архитектура и границы интеграции.
+- [ML_METHODS.md](docs/ML_METHODS.md) — методика, ограничения и защита final test.
+- [ML_CAPABILITIES.md](docs/ML_CAPABILITIES.md) — доступность четырёх направлений.
+- [DATA_CARD.md](docs/DATA_CARD.md) — безопасный локальный формат Data Card.
+- [PERFORMANCE.md](docs/PERFORMANCE.md) — воспроизводимый inference benchmark.
+- [TZ_COMPLIANCE.md](docs/TZ_COMPLIANCE.md) — доказательства соответствия ТЗ.
+- [SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) — результаты и ограничения ИБ.
+- [TEST_PROTOCOL.md](docs/TEST_PROTOCOL.md) — автоматические и ручные проверки.
+- [LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md) — локальный периметр, setup и security checks.

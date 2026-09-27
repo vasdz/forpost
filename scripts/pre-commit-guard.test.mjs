@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   findGuardViolations,
+  getTrackedFiles,
   getChangedPathsFromEntries,
   getChangedFiles,
   getNewBranchRange,
@@ -81,6 +82,23 @@ describe('findGuardViolations', () => {
     ]);
   });
 
+  it('blocks secrets and common model artifacts while allowing the safe environment template', () => {
+    expect(
+      findGuardViolations([
+        { path: '.env', size: 128 },
+        { path: '.env.local', size: 128 },
+        { path: '.env.example', size: 128 },
+        { path: 'artifacts/model.joblib', size: 128 },
+        { path: 'exports/checkpoint.onnx', size: 128 },
+      ]),
+    ).toEqual([
+      'Запрещено добавлять файл секретов: .env',
+      'Запрещено добавлять файл секретов: .env.local',
+      'Запрещено добавлять ML-артефакт вне реестра: artifacts/model.joblib',
+      'Запрещено добавлять ML-артефакт вне реестра: exports/checkpoint.onnx',
+    ]);
+  });
+
   it('blocks any staged file larger than five million bytes', () => {
     expect(
       findGuardViolations([
@@ -110,6 +128,28 @@ describe('разбор вывода Git для push-проверки', () => {
 });
 
 describe('Git index and revision range integration', () => {
+  it('checks every tracked file for a repository-wide self-check', () => {
+    const repositoryPath = mkdtempSync(join(tmpdir(), 'forpost-tracked-guard-'));
+    const git = (...args) => execFileSync('git', args, { cwd: repositoryPath, encoding: 'utf8' });
+
+    try {
+      git('init', '--initial-branch=main');
+      git('config', 'user.email', 'guard-test@example.invalid');
+      git('config', 'user.name', 'Guard Test');
+      mkdirSync(join(repositoryPath, 'data', 'processed'), { recursive: true });
+      writeFileSync(join(repositoryPath, 'README.md'), 'safe');
+      writeFileSync(join(repositoryPath, 'data', 'processed', 'snapshot.json'), '{}');
+      git('add', '.');
+      git('commit', '-m', 'tracked files');
+
+      expect(findGuardViolations(getTrackedFiles(repositoryPath))).toEqual([
+        'Запрещено добавлять в индекс файл данных: data/processed/snapshot.json',
+      ]);
+    } finally {
+      rmSync(repositoryPath, { recursive: true, force: true });
+    }
+  });
+
   it('checks staged additions, ignores unstaged files, detects renames, and ignores deletions', () => {
     const repositoryPath = mkdtempSync(join(tmpdir(), 'forpost-guard-'));
     const git = (...args) => execFileSync('git', args, { cwd: repositoryPath, encoding: 'utf8' });

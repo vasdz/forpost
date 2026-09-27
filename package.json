@@ -11,7 +11,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "hooks:install": "node scripts/git-hooks.mjs install"
+    "hooks:install": "node scripts/git-hooks.mjs install",
+    "verify:submission": "node scripts/verify-submission.mjs",
+    "verify:submission:fast": "node scripts/verify-submission-fast.mjs",
+    "verify:submission:full": "node scripts/verify-submission.mjs"
   },
   "dependencies": {
     "clsx": "2.1.1",

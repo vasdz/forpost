@@ -81,8 +81,7 @@ class ForecastFactEvidence(ExactModel):
         if len({row.id for row in self.rows}) != len(self.rows):
             raise ValueError("Идентификаторы строк должны быть уникальны")
         expected_confusion = tuple(
-            _confusion(row.probability >= self.threshold, row.observed_outcome)
-            for row in self.rows
+            _confusion(row.probability >= self.threshold, row.observed_outcome) for row in self.rows
         )
         if expected_confusion != tuple(row.confusion for row in self.rows):
             raise ValueError("Матрица ошибок не соответствует прогнозам и фактам")
@@ -246,4 +245,3 @@ def _validate_lift(rows: tuple[ForecastFactRow, ...], points: tuple[LiftPoint, .
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator else 0.0
-

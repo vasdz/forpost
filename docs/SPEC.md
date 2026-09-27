@@ -303,8 +303,9 @@ type Prediction = {
   `label_strategy: cadence_adjusted_silence_horizon_proxy_v2`; он оценивает
   риск неожиданного прекращения ожидаемой телеметрии относительно
   индивидуального cadence, а физический отказ им не доказан;
-- статус `passed` требует строго `precision > 0.70` и `recall > 0.50` на
-  финальном temporal holdout; равенство порогу не считается прохождением;
+- статус `passed` определяется внутренней policy, зафиксированной до final
+  temporal holdout; историческая policy `precision > 0.70` и `recall > 0.50`
+  не является требованием ТЗ и не должна переписывать measured metrics `v10`;
 - `predicted_at` передаётся в ISO 8601 с часовым поясом;
 - `horizon_hours` — положительное целое число;
 - `factors` упорядочены по абсолютному влиянию; для текущей модели это

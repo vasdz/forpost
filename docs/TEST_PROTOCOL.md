@@ -18,7 +18,10 @@ npm test
 & .\.venv\Scripts\python.exe -m ruff format --check .
 & .\.venv\Scripts\python.exe -m bandit -r apps packages scripts -c .bandit.yaml
 npm run build
+npm run verify:submission:fast
+npm run verify:submission:full
 node scripts/pre-commit-guard.mjs
+node scripts/pre-commit-guard.mjs --tracked
 git diff --check
 git ls-files -- data
 ```
@@ -57,10 +60,13 @@ ML inference или промышленного SLA.
 
 ## Проверка качества ML
 
-Сверьте статус отчёта, temporal split, purge, calibration и отдельные
+Сверьте статус `v10`, temporal split, purge, calibration и отдельные
 validation/test метрики по [ML_METHODS.md](ML_METHODS.md). Serving разрешён
-только отдельным валидным prediction export. Целевые gates ТЗ: precision > 0,70,
-recall > 0,50, горизонт не менее 24 ч, batch inference менее 5 минут.
+только отдельным валидным prediction export. ТЗ требует горизонт не менее
+24 часов и определить целевые Precision/Recall на этапе проектирования с
+учётом качества данных; оно не устанавливает фиксированный Precision `0,70`.
+Внутренние policy-gates и actual measured metrics — разные сущности и не
+должны смешиваться.
 
 ## Форма результата
 

@@ -94,6 +94,15 @@ describe('локальный стек', () => {
     );
   });
 
+  it('передаёт явный проектный Python в API launcher', () => {
+    const launches = getLocalStackLaunches({
+      PATH: process.env.PATH ?? '',
+      FORPOST_PYTHON: 'project-venv-python',
+    });
+
+    expect(launches.api.command).toBe('project-venv-python');
+  });
+
   it('передаёт API исходные Python-пути репозитория', () => {
     const launches = getLocalStackLaunches({ PATH: process.env.PATH ?? '' });
     const pythonPaths = launches.api.env.PYTHONPATH.split(path.delimiter);
