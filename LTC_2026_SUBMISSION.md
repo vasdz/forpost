@@ -44,6 +44,8 @@
 
 - Периметр и результаты: [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
 - Модель угроз: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+- Цепочка data → action и trust boundaries: [docs/SECURITY_BY_DESIGN.md](docs/SECURITY_BY_DESIGN.md).
+- Угроза → control → source → test: [docs/SECURITY_EVIDENCE.md](docs/SECURITY_EVIDENCE.md).
 - Guards: `scripts/pre-commit-guard.mjs`, `scripts/server-perimeter-guard.mjs`.
 - Механизмы: loopback-only, Bearer/RBAC/ABAC, short demo assertions, CSRF,
   origin checks, idempotency, payload/rate limits, SHA-256 manifest и audit ledger.

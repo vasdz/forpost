@@ -15,6 +15,8 @@ const REVIEWER_DOCUMENTS = [
   'docs/DATA_CARD.md',
   'docs/PERFORMANCE.md',
   'docs/SECURITY_AUDIT.md',
+  'docs/SECURITY_BY_DESIGN.md',
+  'docs/SECURITY_EVIDENCE.md',
   'docs/TEST_PROTOCOL.md',
 ];
 

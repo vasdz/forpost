@@ -28,6 +28,8 @@ describe('getReviewerDocumentIssues', () => {
       'docs/DATA_CARD.md': '# Data Card\n',
       'docs/PERFORMANCE.md': '# Performance\n',
       'docs/SECURITY_AUDIT.md': '# Security\n',
+      'docs/SECURITY_BY_DESIGN.md': '# Security by Design\n',
+      'docs/SECURITY_EVIDENCE.md': '# Security evidence\n',
       'docs/TEST_PROTOCOL.md': '# Test protocol\n',
     })).toEqual([]);
 
@@ -42,6 +44,8 @@ describe('getReviewerDocumentIssues', () => {
       'Отсутствует обязательный reviewer-файл: docs/DATA_CARD.md',
       'Отсутствует обязательный reviewer-файл: docs/PERFORMANCE.md',
       'Отсутствует обязательный reviewer-файл: docs/SECURITY_AUDIT.md',
+      'Отсутствует обязательный reviewer-файл: docs/SECURITY_BY_DESIGN.md',
+      'Отсутствует обязательный reviewer-файл: docs/SECURITY_EVIDENCE.md',
       'Отсутствует обязательный reviewer-файл: docs/TEST_PROTOCOL.md',
       'README.md содержит устаревшее current-release упоминание v9.',
     ]);

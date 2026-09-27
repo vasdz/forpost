@@ -30,12 +30,20 @@ simulated draft; `/topology` — негеографическая структу
 
 ## Где смотреть доказательства
 
+Security-first маршрут: 1) этот файл — контекст, 2) UI и proxy prediction —
+разделение факта/прогноза, 3) [Security by Design](docs/SECURITY_BY_DESIGN.md)
+— границы decision pipeline, 4) [Security Evidence](docs/SECURITY_EVIDENCE.md)
+— конкретный код и проверки, 5) [Threat Model](docs/THREAT_MODEL.md) —
+остаточные риски, 6) ML Methods, 7) TZ Compliance.
+
 - Состояние, фактические метрики `v10` и ограничения: [PROJECT_PASSPORT.md](PROJECT_PASSPORT.md).
 - Архитектура и поток данных: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - ML-методика, temporal split, calibration и final test: [docs/ML_METHODS.md](docs/ML_METHODS.md).
 - Доступность четырёх направлений: [docs/ML_CAPABILITIES.md](docs/ML_CAPABILITIES.md).
 - Сверка с ТЗ и способы проверки: [docs/TZ_COMPLIANCE.md](docs/TZ_COMPLIANCE.md).
 - Security, data perimeter и аудит: [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
+- Security by Design: [docs/SECURITY_BY_DESIGN.md](docs/SECURITY_BY_DESIGN.md).
+- Security evidence matrix: [docs/SECURITY_EVIDENCE.md](docs/SECURITY_EVIDENCE.md).
 - Тесты и ручный приёмочный маршрут: [docs/TEST_PROTOCOL.md](docs/TEST_PROTOCOL.md).
 
 ## Как запустить локально

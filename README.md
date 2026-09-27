@@ -5,6 +5,21 @@
 не автоматизирует действия диспетчера и сохраняет проверяемую цепочку решения
 до локального черновика заявки.
 
+## Security by Design
+
+```text
+DATA → PERIMETER / INTEGRITY → ML VALIDATION → MODEL INTEGRITY → EVIDENCE
+     → HUMAN DECISION → AUDIT → ACTION DRAFT
+```
+
+Контур fail-closed, разделяет server-side identity и least privilege, применяет
+RBAC/ABAC, CSRF/origin/host validation, rate limits, idempotency и проверку
+payload/path. Git-периметр защищает локальные данные; manifest SHA-256 и evidence
+tier защищают публикацию прогноза; бизнес-действие остаётся только у человека и
+попадает в hash-chain audit. Контроли и их доказательства:
+[Security by Design](docs/SECURITY_BY_DESIGN.md),
+[Security Evidence](docs/SECURITY_EVIDENCE.md).
+
 ## Что реализовано
 
 - веб-ситуационный центр на Next.js и FastAPI;
@@ -99,6 +114,15 @@ temporal split, purge/embargo, отдельная calibration и final untouched
 проектирования. Подробнее: [ML_METHODS.md](docs/ML_METHODS.md) и
 [ML_CAPABILITIES.md](docs/ML_CAPABILITIES.md).
 
+## Why the prediction is trustworthy
+
+Мы контролируем процесс получения и публикации прогноза и явно обозначаем
+границы его доказательности: temporal validation, purge/embargo, frozen final
+test, calibration, release metadata, integrity manifest, evidence tier и
+attached observed evidence. `24h proxy risk of unexpected telemetry silence`
+не равен физическому отказу; отсутствие доверенного artefact даёт fail-closed
+ответ, а решение всегда принимает диспетчер.
+
 ## Быстрый локальный запуск
 
 Windows:
@@ -167,5 +191,7 @@ notifications и decision/applications.
 - [PERFORMANCE.md](docs/PERFORMANCE.md) — воспроизводимый inference benchmark.
 - [TZ_COMPLIANCE.md](docs/TZ_COMPLIANCE.md) — доказательства соответствия ТЗ.
 - [SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) — результаты и ограничения ИБ.
+- [SECURITY_BY_DESIGN.md](docs/SECURITY_BY_DESIGN.md) — границы целостности decision pipeline.
+- [SECURITY_EVIDENCE.md](docs/SECURITY_EVIDENCE.md) — control → код → test matrix.
 - [TEST_PROTOCOL.md](docs/TEST_PROTOCOL.md) — автоматические и ручные проверки.
 - [LOCAL_VERIFY.md](docs/LOCAL_VERIFY.md) — локальный периметр, setup и security checks.
